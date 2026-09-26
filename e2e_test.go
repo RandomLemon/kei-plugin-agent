@@ -59,8 +59,8 @@ func TestE2EMockAdapterInject(t *testing.T) {
 	if !env.waitSends(1, 3*time.Second) {
 		t.Fatal("mock 适配器注入后应触发一次回复")
 	}
-	if got := plainText(env.fake.at(0).Msg); got != "打球可以啊" {
-		t.Fatalf("文本 = %q", got)
+	if got := env.fake.texts(); len(got) != 1 || got[0] != "打球可以啊" {
+		t.Fatalf("发送内容 = %v", got)
 	}
 
 	// /agent off 后不再增长。

@@ -275,7 +275,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 
 	if !p.sem.TryAcquire() {
 		p.bumpDropped(st)
-		p.skipLog(st.key, "semaphore_full", st.senderID())
+		_ = p.skipLog(st.key, "semaphore_full", st.senderID())
 		return
 	}
 	defer p.sem.Release()
@@ -283,7 +283,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	st.mu.Lock()
 	if st.epoch != epoch {
 		st.mu.Unlock()
-		p.skipLog(st.key, "stale", st.senderID())
+		_ = p.skipLog(st.key, "stale", st.senderID())
 		return
 	}
 	pendingKind := st.pendingKind
@@ -310,7 +310,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	if err != nil {
 		p.bumpLLMError(st)
 		p.log.Warn("agent: LLM 调用失败", "channel", st.key, "err", err)
-		p.skipLog(st.key, "llm_error", sender)
+		_ = p.skipLog(st.key, "llm_error", sender)
 		return
 	}
 	if p.cfg.debugPrompts {
@@ -323,14 +323,14 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	reply, reason := p.cleanReply(content, pf.SkipToken, st)
 	if reason != "" {
 		p.bumpSkip(st)
-		p.skipLog(st.key, reason, sender)
+		_ = p.skipLog(st.key, reason, sender)
 		return
 	}
 
 	st.mu.Lock()
 	if st.epoch != epoch {
 		st.mu.Unlock()
-		p.skipLog(st.key, "stale", sender)
+		_ = p.skipLog(st.key, "stale", sender)
 		return
 	}
 	platform, botID, channelID := st.platform, st.botID, st.channelID
@@ -348,7 +348,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	res, err := p.api.Send(p.ctx, target, msg)
 	if err != nil {
 		p.log.Warn("agent: 发送失败", "channel", st.key, "err", err)
-		p.skipLog(st.key, "send_error", sender)
+		_ = p.skipLog(st.key, "send_error", sender)
 		return
 	}
 

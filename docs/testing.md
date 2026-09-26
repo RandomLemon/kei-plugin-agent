@@ -14,6 +14,8 @@ go test ./...
 go test -race ./...
 ```
 
+命令在 `flake.nix` devShell 内执行（direnv `use flake` → `nix develop`；`go` 由 devShell 提供，`GOTOOLCHAIN=local`）。额外可选：`golangci-lint run`。
+
 `go test -race ./...` 是**必过项**：本插件大量使用定时器与并发状态，竞态检测不可省。
 
 ## 11.2 单元测试矩阵

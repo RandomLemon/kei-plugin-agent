@@ -8,7 +8,7 @@
 
 `docs/` 是**验收基线**：实现必须与文档一致；行为变更先改文档，再改代码。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定。
 
-质量门（[`testing.md`](testing.md) §11.1）全绿：`gofmt -l .` 无输出、`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`。
+质量门（[`testing.md`](testing.md) §11.1）全绿：`gofmt -l .` 无输出、`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`。开发环境由 `flake.nix` + `.envrc`（direnv `use flake`）提供，在 devShell 内执行上述命令。
 
 ## 12.2 实现阶段
 

@@ -222,6 +222,10 @@ type channelState struct {
 ```text
 kei-plugin-agent/
 ├── go.mod           module github.com/RandomLemon/kei-plugin-agent（require kei）
+├── flake.nix        nix devShell（go / gopls / golangci-lint / dlv / jq / curl）
+├── flake.lock       flake 输入锁（nixpkgs）
+├── .envrc           direnv：进入目录自动执行 `nix develop`
+├── .gitignore       忽略 .direnv/、/bin/、*.test 等本地产物
 ├── register.go      init() 注册 + Metadata（插件名 agent、权限声明）
 ├── plugin.go        Plugin 结构、Setup/Start/Stop、runtime 装配
 ├── config.go        配置结构、读取与默认值、校验（loadConfig）

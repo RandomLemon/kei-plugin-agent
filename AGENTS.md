@@ -27,6 +27,7 @@
 - 零第三方运行时依赖，LLM 调用用纯 `net/http`；不引入任何 LLM SDK。
 - 唯一非标准库依赖是 `github.com/RandomLemon/kei`（提供 `pkg/bot`、`pkg/message`）。
 - 本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（kei 无 release tag，见 [`docs/architecture.md`](docs/architecture.md) 第 6 节）。
+- 开发环境：`flake.nix` + `.envrc`（direnv `use flake` → `nix develop`）提供 Go/gopls/gotools/golangci-lint/dlv 工具链，`GOTOOLCHAIN=local`。flake 只提供 `devShell` 与 `formatter`：构建依赖同级 kei 检出，nix 沙箱内没有该目录，故不提供 `packages`/`checks`。
 
 ### 2.3 运行时契约
 
@@ -50,6 +51,7 @@ go test -race ./...
 
 - 公开符号必须有文档注释；注释与实现不符视为缺陷。
 - 行为变更（配置键、提示词模板、决策参数、日志字段）必须同步更新 `docs/` 对应文档。
+- 在 `flake.nix` devShell 内执行（`go` 由 devShell 提供，`GOTOOLCHAIN=local`）；`golangci-lint run` 为可选的额外静态检查。
 
 质量门的完整口径、单元测试矩阵与端到端联调步骤见 [`docs/testing.md`](docs/testing.md) 第 11 节。
 
@@ -71,6 +73,10 @@ go test -race ./...
 ```text
 kei-plugin-agent/
 ├── go.mod           module github.com/RandomLemon/kei-plugin-agent（require kei）
+├── flake.nix        nix devShell（go / gopls / golangci-lint / dlv / jq / curl）
+├── flake.lock       flake 输入锁（nixpkgs）
+├── .envrc           direnv：进入目录自动执行 `nix develop`
+├── .gitignore       忽略 .direnv/、/bin/、*.test 等本地产物
 ├── register.go      init() 注册 + Metadata（插件名 agent、权限声明）
 ├── plugin.go        Plugin 结构、Setup/Start/Stop、runtime 装配
 ├── config.go        配置结构、读取与默认值、校验（loadConfig）
