@@ -1,0 +1,110 @@
+# llm.md — LLM 客户端（第 9 章）
+
+本文覆盖第 9 章：与 OpenAI 兼容服务的协议、请求/响应、超时重试与错误、长度与成本、密钥与日志安全、替换服务。配置键名与默认值以 [`configuration.md`](configuration.md) §10.1 为唯一权威；人格与提示词模板见 [`persona.md`](persona.md) 第 8 章。
+
+## 9.1 协议与请求
+
+- 端点：`POST {base_url}/chat/completions`（先 `strings.TrimRight(base_url, "/")`，再拼 `/chat/completions`）。
+- 请求头：`Content-Type: application/json`、`Authorization: Bearer {llm_api_key}`，再叠加 `llm_extra_headers`（**后**叠加，因此中继服务可覆盖 `Authorization`）。
+- HTTP 客户端：注入 `PluginContext.HTTPClient`（未声明 `network` 权限时为 nil → `Setup` 直接报错 `agent: 需要 network 权限`）。纯 `net/http`，不引入任何 SDK。
+
+请求体（逐字形状）：
+
+```json
+{"model":"<llm_model>","temperature":0.8,"max_tokens":200,
+ "messages":[{"role":"system","content":"<系统提示词>"},
+             {"role":"user","content":"[群聊记录]\n..."}]}
+```
+
+- `temperature`/`max_tokens` 取**当前人格**的覆盖值，缺失则回落全局键 `llm_temperature`/`llm_max_tokens`。
+- `system` 的 `content` 是 `persona_template` 渲染结果，包含 10 个占位符（`{{persona}}`、`{{persona_name}}`、`{{channel_name}}`、`{{channel_id}}`、`{{platform}}`、`{{bot_name}}`、`{{now}}`、`{{last_sender}}`、`{{max_chars}}`、`{{skip_token}}`），模板全文与取值见 [`persona.md`](persona.md) §8.5（本文不重复）。
+- `user` 的 `content` 是历史渲染块，见 [`persona.md`](persona.md) §8.6。
+
+**注入缝（逐字）**：
+
+```go
+// completionRequest 是一次补全请求；System/User 分别对应 system 与 user 消息。
+type completionRequest struct {
+	System      string
+	User        string
+	Temperature float64
+	MaxTokens   int
+}
+
+// completer 屏蔽具体 LLM 服务，便于单测注入桩。
+type completer interface {
+	Complete(ctx context.Context, req completionRequest) (string, error)
+}
+
+type openaiClient struct { // 实现 completer
+	baseURL string
+	apiKey  string
+	model   string
+	headers map[string]string
+	http    *http.Client
+	log     *slog.Logger
+	retries int
+	timeout time.Duration // llm_timeout，每次尝试独立派生
+}
+```
+
+`Plugin.completer` 字段类型为 `completer`，默认为 `*openaiClient`；单测注入桩实现同一接口（见 [`testing.md`](testing.md) §11.2）。
+
+## 9.2 响应解析
+
+- 读体上限 **1 MiB**（`io.LimitReader`），超限视为错误。
+- 解析 `choices`：
+  - `choices` 为空，或缺少 `choices[0].message.content` → 视为错误（点名兼容「只返回 `reasoning_content` 的中继」）；
+  - `content` 不是字符串 → 错误。
+- 成功返回 `choices[0].message.content` 字符串，交由 [`persona.md`](persona.md) §8.7 清洗。
+
+## 9.3 超时、重试与错误
+
+- 每次尝试独立派生 `context.WithTimeout(p.ctx, llm_timeout)`（attempt ctx 派生自**插件级** `p.ctx`，**不是** Handler ctx）。
+- 重试条件：仅 `429`、`5xx` 与网络错误重试；次数 `llm_max_retries`（默认 1）。
+- 退避：`500ms * 2^attempt`，等待用 `select` 且可被 ctx 取消。
+- 其它 `4xx` **不重试**。
+- 失败只记 `Warn`（含状态码与 ≤256 字节的响应体片段），reason `llm_error`，**绝不因此发送任何消息**。
+- 总耗时上界 = `(1 + llm_max_retries) * llm_timeout + 退避和`，不受核心 `RuleTimeout`/`EventTimeout` 约束（已脱离 Handler ctx）。
+
+## 9.4 长度与成本控制
+
+| 参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `llm_max_tokens` | 限制**生成**长度 | `200` |
+| `context_max_messages` | 限制**输入历史条数** | `20` |
+| `llm_history_max_chars` | 限制**输入历史字符数**（rune） | `4000` |
+| `reply_max_chars` | 对 LLM 输出做**二次硬截断** | `200` |
+
+三者关系：输入长度由 `context_max_messages` + `llm_history_max_chars` 双重限制（超限从最旧丢弃、始终保留最新一条）；输出长度由 `llm_max_tokens` 限制，再由 `reply_max_chars` 兜底截断。默认值即推荐取值。
+
+## 9.5 安全与日志
+
+- **永不记录 `llm_api_key`**。
+- 日志只出现 `base_url` 的 **host** 与 `llm_model`，不出现完整 URL、不出现查询串。
+- `debug_prompts=true` 时也不记录 `Authorization` 头（`llm_extra_headers` 同理，只记头名不记值）。
+- 失败响应体片段截断到 256 字节后再记录。
+
+## 9.6 替换服务
+
+只需改 `llm_base_url` + `llm_model`（密钥用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入）：
+
+```yaml
+# OpenAI
+llm_base_url: "https://api.openai.com/v1"
+llm_model: "gpt-4o-mini"
+
+# DeepSeek
+llm_base_url: "https://api.deepseek.com/v1"
+llm_model: "deepseek-chat"
+
+# Ollama（本地）
+llm_base_url: "http://127.0.0.1:11434/v1"
+llm_model: "qwen2.5:7b"
+
+# 自建 vLLM
+llm_base_url: "http://127.0.0.1:8000/v1"
+llm_model: "Qwen/Qwen2.5-7B-Instruct"
+```
+
+中继服务需要额外鉴权头时用 `llm_extra_headers`；若中继用自定义 `Authorization`，后叠加的 `llm_extra_headers` 会覆盖默认值。

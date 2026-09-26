@@ -1,0 +1,233 @@
+package agent
+
+import (
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/RandomLemon/kei/pkg/bot"
+)
+
+// defaultPersonaTemplate 是内建系统提示词模板（逐字见 docs/persona.md §8.5）。
+const defaultPersonaTemplate = `你正在一个群聊里聊天。
+
+# 你是谁
+{{persona}}
+
+# 你在哪
+群「{{channel_name}}」（{{platform}} / {{bot_name}}），现在时间 {{now}}，最近发言的人：{{last_sender}}。
+
+# 怎么说话
+- 像群里一个普通真人：口语、短，通常一到两句话，最多不超过 {{max_chars}} 个字。
+- 不要用 Markdown、列表、标题；不要自称 AI、机器人、助手、模型，也不要解释自己是谁。
+- 只依据下面给出的聊天记录，不要编造没发生的事；不确定就少说或不说。
+- 群里可能同时在聊别的话题；只有你觉得此刻插一句自然，才说话。
+- 决定说话时直接输出你要发的那句话，不要加引号，不要加「{{persona_name}}:」这类前缀。
+- 决定不插话时，只输出 {{skip_token}}，不要输出其他任何内容。
+`
+
+// resolvePersona 按「运行时覆盖 > bindings > default_persona」解析人格。
+func (p *Plugin) resolvePersona(st *channelState) (string, string) {
+	st.mu.Lock()
+	override := st.persona
+	platform, botID, channelID := st.platform, st.botID, st.channelID
+	st.mu.Unlock()
+
+	if override != "" {
+		if _, ok := p.cfg.personas[override]; ok {
+			return override, "override"
+		}
+	}
+	if name, ok := p.cfg.matchBinding(platform, botID, channelID); ok {
+		return name, "binding"
+	}
+	return p.cfg.defaultPersona, "default"
+}
+
+// personaDisplayName 返回人格显示名。
+func (p *Plugin) personaDisplayName(name string) string {
+	if pf, ok := p.cfg.personas[name]; ok && pf.DisplayName != "" {
+		return pf.DisplayName
+	}
+	return name
+}
+
+// renderSystemPrompt 渲染系统提示词；未知占位符原样保留。
+func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, history []Turn) string {
+	pf := p.cfg.personas[personaName]
+	platform, botID, channelName, channelID := st.info()
+	if channelName == "" {
+		channelName = channelID
+	}
+	now := p.now().In(p.cfg.randomTimezone).Format("2006-01-02 15:04")
+	repl := strings.NewReplacer(
+		"{{persona}}", pf.Prompt,
+		"{{persona_name}}", personaName,
+		"{{channel_name}}", channelName,
+		"{{channel_id}}", channelID,
+		"{{platform}}", platform,
+		"{{bot_name}}", botID,
+		"{{now}}", now,
+		"{{last_sender}}", lastSender(history),
+		"{{max_chars}}", strconv.Itoa(p.cfg.replyMaxChars),
+		"{{skip_token}}", pf.SkipToken,
+	)
+	tmpl := p.cfg.personaTemplate
+	if tmpl == "" {
+		tmpl = defaultPersonaTemplate
+	}
+	return repl.Replace(tmpl)
+}
+
+// renderHistoryBlock 渲染 user 消息：头 + 每行一条 + 尾部空行。
+//
+// 超字符上限时从最旧丢弃，始终保留最新一条。
+func (p *Plugin) renderHistoryBlock(history []Turn) string {
+	lines := make([]string, 0, len(history))
+	for _, t := range history {
+		name := t.Name
+		if name == "" {
+			name = t.UserID
+		}
+		if name == "" {
+			name = "未知"
+		}
+		lines = append(lines, name+": "+t.Text)
+	}
+	total := 0
+	for _, l := range lines {
+		total += utf8.RuneCountInString(l) + 1
+	}
+	for len(lines) > 1 && total > p.cfg.llmHistoryMaxChars {
+		total -= utf8.RuneCountInString(lines[0]) + 1
+		lines = lines[1:]
+	}
+	return "[群聊记录]\n" + strings.Join(lines, "\n") + "\n\n"
+}
+
+// lastSender 返回历史中最后一条他人消息的显示名。
+func lastSender(history []Turn) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		t := history[i]
+		if t.Self {
+			continue
+		}
+		if t.Name != "" {
+			return t.Name
+		}
+		if t.UserID != "" {
+			return t.UserID
+		}
+	}
+	return "未知"
+}
+
+// renderText 把消息渲染成纯文本，@ 段前置 "@名 "。
+func renderText(msg *bot.Message) string {
+	if msg == nil {
+		return ""
+	}
+	var b strings.Builder
+	hasText := false
+	for _, seg := range msg.Segments {
+		switch seg.Type {
+		case bot.SegText, bot.SegMarkdown:
+			if s, ok := seg.Data[bot.KeyText].(string); ok {
+				b.WriteString(s)
+				hasText = true
+			}
+		case bot.SegAt:
+			name := strOf(seg.Data[bot.KeyUserName])
+			if name == "" {
+				name = strOf(seg.Data[bot.KeyUserID])
+			}
+			b.WriteString("@" + name + " ")
+		}
+	}
+	if !hasText {
+		return fallbackPlaceholder(msg)
+	}
+	return b.String()
+}
+
+// fallbackPlaceholder 按首个非文本段返回占位符。
+func fallbackPlaceholder(msg *bot.Message) string {
+	for _, seg := range msg.Segments {
+		switch seg.Type {
+		case bot.SegImage:
+			return "[图片]"
+		case bot.SegFace:
+			return "[表情]"
+		case bot.SegFile:
+			return "[文件]"
+		case bot.SegCard:
+			return "[卡片]"
+		case bot.SegReply:
+			return "[引用]"
+		}
+	}
+	return "[消息]"
+}
+
+// cleanReply 执行 8 步回复清洗管线；reason 非空表示丢弃。
+func (p *Plugin) cleanReply(raw, skipToken string, st *channelState) (string, string) {
+	reply := strings.TrimSpace(raw)
+	if reply == "" {
+		return "", "empty_reply"
+	}
+	if skipToken != "" && strings.Contains(reply, skipToken) {
+		return "", "skipped_by_llm"
+	}
+	reply = stripWrappingQuotes(reply)
+	reply = collapseWhitespace(reply)
+	reply = truncateRunes(reply, p.cfg.replyMaxChars)
+	if reply == "" {
+		return "", "empty_reply"
+	}
+	if p.cfg.replyDedupe {
+		for _, prev := range st.lastOwnTexts(3) {
+			if prev == reply {
+				return "", "duplicate_reply"
+			}
+		}
+	}
+	return reply, ""
+}
+
+// stripWrappingQuotes 剥掉一层成对包裹的引号。
+func stripWrappingQuotes(s string) string {
+	pairs := [][2]string{{`"`, `"`}, {"“", "”"}, {"「", "」"}, {"『", "』"}, {"'", "'"}}
+	for _, pr := range pairs {
+		if len(s) > len(pr[0])+len(pr[1]) && strings.HasPrefix(s, pr[0]) && strings.HasSuffix(s, pr[1]) {
+			return strings.TrimSpace(s[len(pr[0]) : len(s)-len(pr[1])])
+		}
+	}
+	return s
+}
+
+// collapseWhitespace 把换行/制表符换成空格，并把连续空白压成一个。
+func collapseWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
+			if !space {
+				b.WriteByte(' ')
+				space = true
+			}
+			continue
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// truncateRunes 按 rune 硬截断（不加省略号）。
+func truncateRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
+}

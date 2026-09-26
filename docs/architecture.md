@@ -1,0 +1,281 @@
+# architecture.md — 架构
+
+本文覆盖第 1-6 章：项目定位与边界、架构与数据流、生命周期与并发模型、状态与持久化、目录与文件职责、与 kei 核心的契约对应。
+
+## 1. 项目定位与边界
+
+`kei-plugin-agent` 是 [`kei`](https://github.com/RandomLemon/kei) 的一个**进程内插件**（插件名 `agent`），在群聊里按人格预设偶尔插话，像群里一个普通真人。
+
+**做什么**
+
+- 作为 `bot.Plugin` 注册进 kei 引擎，监听群消息事件（`bot.EventMessage` + `bot.MessageGroup`）。
+- 维护每会话聊天历史，按「人格预设」渲染系统提示词，调用 OpenAI 兼容的 chat completions 接口生成一句话。
+- 用一套可配置的接话决策模型决定「这一轮要不要说话、什么时候说」，包括 @ 寻址必回、随机参与、批处理窗口、冷却、小时配额、静默时段。
+- 提供 `/agent` 管理命令切换人格、开关、查看状态。
+- 用 `bot.Storage` 持久化每会话的运行时覆盖（人格、开关）。
+
+**不做什么**
+
+- 不做平台协议：与具体 IM 平台无关，只依赖 `pkg/bot` 抽象。
+- 不做私聊参与：只注册 `bot.MessageGroup` 规则。如需私聊，另加一条 `WithKind(bot.MessagePrivate)` 规则即可，本设计不覆盖。
+- 不做持久化数据库：只用 `bot.Storage` 键值存储，进程重启丢历史与计数器、保留覆盖与开关。
+- 不引入 LLM SDK：LLM 调用用纯 `net/http`。
+- 不引入第三方依赖：运行时仅标准库 + `github.com/RandomLemon/kei`。
+
+**与 kei 的关系**
+
+本插件是普通第三方进程内插件，与 kei 核心零耦合改动。kei 核心负责事件总线、路由、发送限流/降级/重试、权限裁剪、生命周期管理，本插件只消费 `PluginContext` 暴露的能力（见第 6 章）。
+
+## 2. 架构与数据流
+
+### 2.1 入站数据流与决策数据流
+
+```text
+                        ┌──────────────────────────── kei 核心 ────────────────────────────┐
+平台/HTTP 注入 ──▶ Adapter ──▶ EventBus(分片保序) ──▶ Engine ──▶ Router ──▶ 命中规则
+                                                                             │
+                     ┌───────────────────────────────────────────────────────┘
+                     ▼
+        agent 群消息 Handler（handleGroupMessage）
+        · 只做：过滤 → 记历史 → 判决策 → 布防/并入定时器
+        · 毫秒级返回，绝不在这里调用 LLM 或阻塞等待
+                     │
+                     ▼
+        channelState（每会话状态，加锁保护）
+                     │  定时器触发 onBatch
+                     ▼
+        后台生成协程 generate（由 Start 阶段保存的插件级 ctx 驱动）
+        · 取全局信号量 → 解析人格 → 渲染提示词 → 调用 LLM
+        · 回复清洗 → BotAPI.Send → 回写历史/计数器
+                     │
+                     ▼
+        kei 核心发送链路（能力降级 → 令牌桶限流 → 退避重试）──▶ Adapter ──▶ 平台
+```
+
+两条路径的边界很清楚：
+
+- **入站路径**（Handler 内）必须极快：事件总线按会话分片串行，一个 Handler 卡住会阻塞**同一会话**的后续事件；同时受 `RuleTimeout`（默认 10s）与 `EventTimeout`（默认 30s）约束。
+- **决策路径**（后台协程）允许慢：LLM 调用、重试、发送都在这里，脱离 Handler 的 `ctx`，用插件级 `ctx` 派生超时。
+
+### 2.2 Handler 必须非阻塞的三条理由
+
+1. **规则超时**：`RuleTimeout` 默认 10s，Handler 超时会被中断，异步工作会丢。
+2. **整条事件超时**：`EventTimeout` 默认 30s，Handler 慢会拖垮整条事件处理。
+3. **会话保序**：事件总线按会话分片串行，Handler 阻塞会排队阻塞**同会话**的其它事件（不同会话并行）。
+
+### 2.3 禁止用 Handler 的 ctx 做异步工作
+
+Handler 收到的 `ctx` 在规则超时后会被取消。异步链路（定时器回调、生成协程、发送、Storage 写入）一律用 `Start` 阶段保存的插件级 `ctx` 派生 `context.WithTimeout`；**禁止 `context.Background()`**。插件级 `ctx` 在 `Stop` 时被 cancel，从而终止全部后台工作。
+
+## 3. 生命周期与并发模型
+
+### 3.1 生命周期
+
+`Plugin` 实例在 `init()` 时就得构造（`bot.RegisterPlugin(&Plugin{})`），那一刻没有配置也没有依赖。kei 生命周期固定为 `Setup → Start → Stop`，各阶段独立超时（默认各 15s）且带 panic 隔离；任一阶段返回错误都会阻止框架启动。
+
+**`Setup(ctx, reg)`**
+
+1. `pc, ok := bot.PluginContextFrom(ctx)`；取 `pc.Config`、`pc.Bot`、`pc.Logger`、`pc.Storage`。
+2. `loadConfig(pc.Config)` 解析全部配置并逐条校验；配置非法即返回错误（kei 会终止启动，不做静默降级）。
+3. 检查 `pc.HTTPClient != nil`（未声明 `network` 权限时为 nil）→ 否则返回错误 `agent: 需要 network 权限`。
+4. 注册两条规则（逐字）：
+
+```go
+reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
+	bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("agent:group"))
+
+reg.OnCommand("agent", p.handleCommand,
+	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("agent:admin"))
+```
+
+5. 构造 runtime：注入缝 `now`/`randFloat`/`completer`、全局信号量、`map[string]*channelState`。
+
+**`Start(ctx)`**
+
+1. 保存插件级 `ctx` 与 `cancel`（`p.ctx, p.cancel = context.WithCancel(ctx)`）。
+2. 异步恢复 Storage 覆盖（每会话懒加载，见第 4 章）。
+3. 启动完成，等待事件。
+
+**`Stop(ctx)`**
+
+1. `p.cancel()`：取消插件级 ctx，终止全部派生工作。
+2. 停止全部 `channelState.timer`（每个 `time.Timer.Stop()`）。
+3. `p.wg.Wait()`：等待全部生成协程退出。
+4. 幂等：重复调用安全。不做 flush——持久化是写穿透的（见第 4 章）。
+
+`register.go` 的注册与元信息（逐字）：
+
+```go
+var _ bot.Plugin = (*Plugin)(nil)
+
+func init() { bot.RegisterPlugin(&Plugin{}) }
+
+func (p *Plugin) Metadata() bot.Metadata {
+	return bot.Metadata{
+		Name:        "agent",
+		Version:     "v0.1.0",
+		Author:      "RandomLemon",
+		Description: "LLM 人格代理：在群聊中按人格预设偶尔参与对话",
+		Permissions: []bot.Permission{bot.PermNetwork, bot.PermStorage, bot.PermSendMessage},
+	}
+}
+```
+
+### 3.2 协程清单与并发上限
+
+| 协程 | 生命周期 | 上限 |
+| --- | --- | --- |
+| 每会话生成协程 | 定时器触发时 `wg.Add(1)` 启动，`generate` 返回时 `Done` | 每会话至多 1 个（`inflight` 保证）；全局至多 `limits_max_concurrent` 个真正调用 LLM 的协程 |
+| 写穿透持久化协程 | 每次状态变更时启动，写完后退出 | 每变更一个，数量由变更频率决定；单次 `Set` 带 1s 超时 |
+
+全局信号量 `limits_max_concurrent`（默认 2）用**非阻塞获取**（`TryAcquire`）；获取失败记 `semaphore_full` 并放弃本轮，不排队。
+
+### 3.3 并发表
+
+| 共享状态 | 保护方式 | 说明 |
+| --- | --- | --- |
+| `map[string]*channelState` | `sync.RWMutex`（挂在 `Plugin` 上） | 读多写少；新增/淘汰会话时写锁 |
+| `channelState` 内部字段 | `channelState.mu sync.Mutex` | 每个会话独立锁，避免全局锁竞争 |
+| 全局计数器（`/agent status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
+| 最近发送消息 ID 环（reply 寻址用） | `sync.Mutex` | 容量常量 128 的环形缓冲 |
+
+## 4. 状态与持久化
+
+### 4.1 `channelState`
+
+每会话一份状态，字段逐字如下（方法名见本节末）：
+
+```go
+type channelState struct {
+	mu         sync.Mutex
+	key        string // platform:botID:channelID（Channel 为空时 platform:botID:user:<senderID>）
+	platform   string
+	botID      string
+	channelID  string
+	history    []Turn      // 环形，上限 context_max_messages
+	replyTimes []time.Time // 本会话近 1 小时回复时间窗，用于小时配额
+	lastAgentAt time.Time
+	awaiting   bool
+	firstAt    time.Time
+	lastMsgAt  time.Time
+	timer      *time.Timer
+	inflight   bool
+	epoch      uint64
+	disabled   bool
+	persona    string // 运行时覆盖的人格名，空 = 未覆盖
+	loaded     bool   // Storage 懒加载是否完成
+	lastSenderID string // 最近一条入站消息的真人发送者 ID（用于 reply_mention_sender）
+	lastAddressed bool  // 触发本轮生成的那条消息是否被判定为寻址
+	pendingKind  string // "addressed" | "random"，本次生成的触发来源（日志用）
+	replies    int // 已回复计数（累计）
+	skips      int // 因 LLM 放弃/空回复/重复而跳过的计数
+	llmErrors  int
+	dropped    int // 信号量满或 stale 丢弃的计数
+}
+```
+
+字段语义要点：
+
+- `history` 环形，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
+- `replyTimes` 只保留近 1 小时（`repliesInWindow` 读取时顺带裁剪）。
+- `epoch` 是「状态代次」：`/agent off`、`/agent persona`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
+- `loaded` 表示 Storage 懒加载是否完成；未完成前只记历史、不参与（reason `loading`）。
+- `disabled` 表示该会话被 `/agent off` 关闭。
+
+方法名固定为：`appendHistory(Turn)`、`snapshotHistory(max int) []Turn`、`repliesInWindow(now time.Time, d time.Duration) int`、`distinctHumans(now time.Time, d time.Duration) int`。计数器名固定为 `replies`、`skips`、`llmErrors`、`dropped`（另有全局原子计数用于 `/agent status` 的汇总行）。
+
+### 4.2 会话键
+
+会话键为 `platform:botID:channelID`；当 `ev.Channel == nil`（无频道信息）时回落 `platform:botID:user:<senderID>`。键写入 `channelState.key`，日志字段 `channel=<key>` 用同一值。
+
+### 4.3 LRU 淘汰
+
+内存中最多跟踪 `context_max_channels`（默认 512）个会话。超限时按最近使用时间淘汰，**只淘汰非 `inflight` 且非 `awaiting`** 的状态（有在途生成或已布防定时器的会话不淘汰）。淘汰只释放内存，不影响已持久化的覆盖。
+
+### 4.4 Storage 键与 JSON 形状
+
+- 键：`agent:override:<platform>:<botID>:<channelID>`。
+- 值（JSON）：`{"persona":"...","disabled":false}`。`persona` 为空表示无覆盖，`disabled` 为 `true` 表示该会话被关闭。
+- 无 TTL：覆盖与开关长期保留。
+
+### 4.5 懒加载异步化
+
+首次见到某会话时**异步**触发一次 `Storage.Get`：
+
+- 未加载完成前，Handler 只记历史、不做决策，reason `loading`（见 [`participation.md`](participation.md) §7.7）。
+- 加载成功：把 `persona`、`disabled` 写回状态，置 `loaded = true`。
+- 加载失败（含 `bot.ErrNotFound`）：视为无覆盖，置 `loaded = true`，只记 `Debug`/`Warn`。
+
+### 4.6 写穿透异步化
+
+内存是唯一事实来源。每次覆盖/开关变更后**异步**启动一次 `Storage.Set`：
+
+- 写操作带 1s 超时（派生自插件级 ctx）。
+- 失败只记 `Warn`，不重试、不回滚（内存仍为准）。
+
+### 4.7 重启语义
+
+进程重启后：历史与计数器丢失（内存态）；覆盖与开关保留（已持久化）。
+
+## 5. 目录与文件职责
+
+```text
+kei-plugin-agent/
+├── go.mod           module github.com/RandomLemon/kei-plugin-agent（require kei）
+├── register.go      init() 注册 + Metadata（插件名 agent、权限声明）
+├── plugin.go        Plugin 结构、Setup/Start/Stop、runtime 装配
+├── config.go        配置结构、读取与默认值、校验（loadConfig）
+├── persona.go       人格预设解析、绑定匹配、提示词模板渲染
+├── decision.go      接话决策：过滤、寻址判定、随机参与、批处理定时器
+├── state.go         每会话状态、历史环、计数器、Storage 读写
+├── llm.go           OpenAI 兼容客户端（请求/响应/重试/超时）
+├── commands.go      /agent 管理命令
+├── config_test.go   配置解析与校验单测
+├── decision_test.go 决策模型单测（过滤/寻址/随机/窗口/epoch）
+├── llm_test.go      LLM 客户端单测（httptest.Server）
+├── persona_test.go  人格解析、模板渲染、历史渲染、清洗单测
+├── helpers_test.go  测试桩与测试环境构造
+├── e2e_test.go      Mock 适配器端到端测试
+├── docs/            设计文档（本目录即实现口径）
+├── AGENTS.md        硬性规则与结构概览
+└── LICENSE          MIT
+```
+
+| 文件 | 职责（一句话） |
+| --- | --- |
+| `register.go` | 插件自注册与 `Metadata`（名称、版本、作者、描述、权限声明）。 |
+| `plugin.go` | `Plugin` 结构定义、`Setup`/`Start`/`Stop`、从 `PluginContext` 装配 runtime 与注入缝。 |
+| `config.go` | 从 `*bot.Config` 读取全部键、填默认值、`loadConfig` 校验并返回 `config` 结构。 |
+| `persona.go` | `personas`/`bindings` 解析、人格解析优先级、`persona_template` 渲染、历史渲染、回复清洗。 |
+| `decision.go` | 群消息过滤、寻址判定、随机参与判定、批处理定时器（`onGroupMessage`/`schedule`/`onBatch`）。 |
+| `state.go` | `channelState`、历史环、计数器、LRU、Storage 懒加载/写穿透。 |
+| `llm.go` | `completer` 接口与 `openaiClient` 实现（请求构造、响应解析、超时重试）。 |
+| `commands.go` | `/agent status|persona|on|off|reset` 子命令实现。 |
+| `*_test.go` | 按文件名的领域单测；`e2e_test.go` 走 mock 适配器端到端。 |
+
+## 6. 与 kei 核心的契约对应
+
+左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `2b45e7dedc03d016b7763df20656bfe57ba20c15`）。
+
+| 本插件的假设/用法 | kei 的事实来源 |
+| --- | --- |
+| `Plugin` 生命周期固定 `Setup → Start → Stop`，各阶段默认 15s 超时、带 panic 隔离，任一阶段返回错误阻止启动 | `pkg/bot/plugin.go`；`internal/pluginmgr/manager.go` `defaultSetupTimeout`/`defaultStartTimeout`/`defaultStopTimeout` |
+| `Metadata.Permissions` 决定依赖裁剪：未声明 `network` → `PluginContext.HTTPClient == nil`；未声明 `storage` → 注入拒绝式 `Storage`；未声明 `send_message` → `BotAPI.Send` 报 `engine: plugin %s lacks permission send_message` | `internal/pluginmgr/manager.go` `contextFor`（`storage.Denied()`）；`internal/engine/pluginapi.go` |
+| `Reply` 所有插件都可用，不受 `send_message` 限制 | `pkg/bot/reply.go`；`internal/engine/pluginapi.go` |
+| 本插件申请 `network`/`storage`/`send_message` 三项权限 | `register.go` 的 `Metadata`；权限常量见 `pkg/bot/plugin.go` |
+| `WithKind(bot.MessageGroup)` 只比较 `ev.Message.Kind`；`ev.Message == nil` 时不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
+| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较 | `docs/engine.md` 7.x；`docs/configuration.md` 13.1 |
+| `OnCommand("agent", ...)` 的规则与群消息规则会被**同时执行**（同一事件命中多条规则全部执行，`Priority` 只影响顺序、不短路，错误 `errors.Join` 聚合），故 Handler 必须无条件丢弃 `Command.Name == "agent"` | `internal/router/router.go` `Dispatch` |
+| 命令前缀默认 `["/"]`；`Command{Name,Args,Raw}`，`Name` 不含前缀；带 `/` 前缀的文本会被填 `ev.Command` | `internal/engine/engine.go`；`pkg/bot/event.go` |
+| Handler 运行在事件总线分片 worker 中：同会话串行、不同会话并行（默认 4 worker × 256 队列） | `docs/engine.md` 8.2/7.5；`internal/eventbus/bus.go` |
+| `RuleTimeout` 默认 10s、`EventTimeout` 默认 30s；故 Handler 必须非阻塞 | `internal/engine/engine.go` |
+| 发送走核心链路：能力降级、每 bot 令牌桶限流（`limits.send_rate`）、退避重试（`SendRetries` 默认 2），插件不重复实现 | `docs/engine.md` 7.7 |
+| `bot.Target{Platform,BotID,ChannelID,Kind}` 显式构造发送目标（不用 `TargetFromEvent`，避免群聊带上 `UserID`） | `pkg/bot/adapter.go` |
+| 优雅关闭：停适配器 → 排空事件总线 → 逆序 `Stop` 插件；`Stop` 之后再发送没有意义 | `docs/engine.md` 7.3 |
+| 插件配置来自 `plugins.agent` 下除 `enabled` 的其余键，经 `PluginContext.Config` 读取 | `docs/configuration.md` 13.3；`internal/engine/engine.go` → `pluginmgr.Deps.Configs` |
+| 环境变量 `KEI_PLUGINS_AGENT_<KEY>` 把**扁平键**写入 `Settings`；故本插件全部用扁平 `snake_case` 键 | `internal/config/env.go` `applyPluginEnv`/`setSetting` |
+| `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 13.2 |
+| 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
+| 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
+| `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
+| 核心仅暴露自身指标（Prometheus 文本），插件的观测面是 `/agent status` 与结构化日志 | `internal/metrics`；本设计 §8.4 |

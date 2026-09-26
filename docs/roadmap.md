@@ -1,0 +1,61 @@
+# roadmap.md — 交付物现状与实现阶段（第 12 章）
+
+本文覆盖第 12 章：当前交付物状态与后续实现阶段划分。
+
+## 12.1 现状
+
+**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `agent` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`helpers_test.go`、`e2e_test.go`）。
+
+`docs/` 是**验收基线**：实现必须与文档一致；行为变更先改文档，再改代码。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定。
+
+质量门（[`testing.md`](testing.md) §11.1）全绿：`gofmt -l .` 无输出、`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`。
+
+## 12.2 实现阶段
+
+以下阶段均已实现，保留作为实现顺序记录；每阶段都满足「可独立编译通过 + 测试全绿」。
+
+### P1 骨架
+
+- `go.mod`（`module github.com/RandomLemon/kei-plugin-agent`，`go 1.25.0`，`require github.com/RandomLemon/kei`）。
+- `register.go`：`init()` 注册 + `Metadata`（见 [`architecture.md`](architecture.md) §3.1）。
+- `plugin.go`：`Plugin` 结构、`Setup`/`Start`/`Stop`、从 `PluginContext` 装配 runtime 与注入缝。
+- `config.go`：全部键读取与默认值、`loadConfig` 全部校验（见 [`configuration.md`](configuration.md) §10.4）。
+- 注册两条规则 + 只记历史的 Handler（先不决策）+ `/agent status|on|off`。
+- `config_test.go` 覆盖校验规则与固定错误文案。
+
+### P2 决策
+
+- `decision.go`：过滤、寻址判定、随机参与、批处理定时器（`onGroupMessage`/`schedule`/`onBatch`）。
+- `state.go`：`channelState`、历史环、计数器、LRU、`st.epoch`、定时器管理。
+- [`testing.md`](testing.md) §11.2 的决策类用例（reason 词表、寻址三种来源、概率边界、冷却/配额、静默时段、窗口合并、`st.epoch`）。
+
+### P3 LLM
+
+- `llm.go`：`completer` 接口与 `openaiClient`（请求构造、响应解析、超时、429/5xx 重试）。
+- 回复清洗管线（[`persona.md`](persona.md) §8.7）。
+- `llm_test.go`：`httptest.Server` 覆盖 200 / 429 / 500 / 400 / 非法 JSON / 缺 `choices` / 超时。
+
+### P4 人格
+
+- `persona.go`：`personas` 解析、`bindings` 匹配与优先级、`persona_template` 渲染、历史渲染。
+- `/agent persona|reset` 子命令与持久化调用。
+- `persona_test.go`：模板 10 个占位符、未知占位符保留、6 种回落占位符、清洗样例、命令输出。
+
+### P5 持久化与联调
+
+- Storage 懒加载（异步）与写穿透（异步，1s 超时，失败 warn）。
+- mock 适配器端到端（[`testing.md`](testing.md) §11.3）。
+- 竞态与优雅关闭测试（[`testing.md`](testing.md) §11.4）。
+
+## 12.3 已知缺口
+
+- **私聊不参与**：只注册 `bot.MessageGroup`。如需私聊，另加一条 `WithKind(bot.MessagePrivate)` 规则。
+- **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/agent status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
+- **无多模态输入**：图片/文件等非文本段只作为历史占位符（`[图片]` 等，见 [`persona.md`](persona.md) §8.6），不解析内容。
+- **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
+
+## 12.4 假设与兜底
+
+- 本次交付同时包含文档与代码；后续变更遵循「先改文档、再改代码」。
+- kei 无 release tag：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出；若已有可用版本号，替换引用即可，不影响设计。
+- 若 `pkg/bot` 在实现期缺少本设计所需 API（例如浮点读取），按 [`llm.md`](llm.md) §9.1 的写法改用 `Get` + 类型断言，不得引入第三方依赖。
