@@ -105,7 +105,28 @@ reason 词表（24 个）单测覆盖：`not_group`、`not_private`、`no_sender
 
 ## 11.3 端到端联调（mock 适配器）
 
-以 kei 仓库检出为宿主，构建一个最小宿主 main：空导入本插件 + 启用 mock 适配器 + `plugins.agent`。为稳定复现，配置 `random_probability: 1.0`、`mention_min_interval: 0s`、`random_cooldown: 0s`。
+以 kei 仓库检出为宿主，构建一个最小宿主 main：空导入本插件 + 启用 mock 适配器 + `plugins.agent`。装配走 kei 公开门面 `pkg/kei`（`kei.Run` 与 `cmd/bot` 是同一份实现），无需复制 `cmd/bot`：
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	_ "github.com/RandomLemon/kei-plugin-agent" // 空导入即注册插件
+	_ "github.com/RandomLemon/kei/adapters/mock"
+	"github.com/RandomLemon/kei/pkg/kei"
+)
+
+func main() {
+	if err := kei.Run(context.Background(), kei.Options{ConfigFile: "configs/config.yaml"}); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+为稳定复现，配置 `random_probability: 1.0`、`mention_min_interval: 0s`、`random_cooldown: 0s`。
 
 LLM 侧用**本地桩服务**（`python3 -m http.server` 不够，它不会返回 JSON）。20 行以内的桩要点：
 

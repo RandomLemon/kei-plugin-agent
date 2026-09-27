@@ -277,10 +277,11 @@ kei-plugin-agent/
 
 ## 6. 与 kei 核心的契约对应
 
-左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `2b45e7dedc03d016b7763df20656bfe57ba20c15`）。
+左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `1979a6747f4fca2b32577132a7cf4fa631955ba6`）。
 
 | 本插件的假设/用法 | kei 的事实来源 |
 | --- | --- |
+| 插件名 `agent` 在 `init()` 里经 `bot.RegisterPlugin` 注册；宿主空导入本包 + 配置 `plugins.agent.enabled: true` 即启用。另一种接入是经装配门面的 `kei.Options.Plugins` 注入 `&agent.Plugin{}`（注入实例一律启用；与 `enabled: false` 或 `grpc_addr` 冲突时启动失败）；配置启用但未注册只记 warn `enabled plugin is not registered` | `pkg/bot/registrar.go` `RegisterPlugin`/`RegisteredPlugins`；`pkg/kei/assemble.go` `selectPlugins`；`docs/plugin.md` 第 9 章 |
 | 插件生命周期固定 `Setup → Start → Stop`，各阶段默认 15s 超时、带 panic 隔离，任一阶段返回错误阻止启动 | `pkg/bot/plugin.go`；`internal/pluginmgr/manager.go` `defaultSetupTimeout`/`defaultStartTimeout`/`defaultStopTimeout` |
 | `Start` 阶段可安全做一次同步 `Storage` 读（阶段预算 15s，本插件 `loadPolicy` 自设 1s 超时，超时只 `Warn`） | `internal/pluginmgr/manager.go` `defaultStartTimeout` |
 | 传给 `Setup`/`Start`/`Stop` 的 ctx 都是**阶段上下文**：`run` 内 `defer cancel()`，阶段函数一返回就取消。故插件级 ctx 必须由 `context.WithoutCancel` 派生（本插件 `Start` 的做法） | `internal/pluginmgr/manager.go` `run` |
