@@ -34,7 +34,7 @@ type openaiClient struct { // 实现 completer
 	log     *slog.Logger
 	retries int
 	timeout time.Duration
-	debug   bool // 是否以 Debug 输出 LLM 返回（debug_prompts）
+	debug   bool // 是否以 Debug 输出 LLM 请求与响应（debug_prompts）
 }
 
 // 确保 openaiClient 满足 completer。
@@ -98,6 +98,9 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	if err != nil {
 		return "", false, fmt.Errorf("agent: 请求编码失败: %w", err)
 	}
+	if c.debug {
+		c.log.Debug("agent llm 请求", "host", hostOf(c.baseURL), "model", c.model, "body", truncateRunes(string(body), 2048))
+	}
 
 	endpoint := trimRightSlash(c.baseURL) + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(actx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -126,23 +129,18 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	if err != nil {
 		return "", true, fmt.Errorf("agent: 读取响应失败: %w", err)
 	}
+	if c.debug {
+		c.log.Debug("agent llm 响应", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode, "body", truncateRunes(string(data), 2048))
+	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		c.log.Debug("agent llm 响应异常", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode)
 		return "", true, fmt.Errorf("agent: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
 	if resp.StatusCode >= 400 {
-		c.log.Debug("agent llm 响应异常", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode)
 		return "", false, fmt.Errorf("agent: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
 	content, err := parseCompletion(data)
 	if err != nil {
-		if c.debug {
-			c.log.Debug("agent llm 响应无法解析", "host", hostOf(c.baseURL), "model", c.model, "body", snippet(data))
-		}
 		return "", false, err
-	}
-	if c.debug {
-		c.log.Debug("agent llm 返回", "host", hostOf(c.baseURL), "model", c.model, "content", truncateRunes(content, 2048))
 	}
 	return content, false, nil
 }

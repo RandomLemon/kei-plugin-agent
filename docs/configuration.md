@@ -49,7 +49,7 @@
 | `reply_mention_sender` | bool | `false` | 回复寻址消息时是否 @ 对方 |
 | `reply_dedupe` | bool | `true` | 与最近 3 条自己的发言重复则不发 |
 | `limits_max_concurrent` | int | `2` | 全局并发 LLM 调用上限 |
-| `debug_prompts` | bool | `false` | 是否 Debug 输出渲染后的提示词与原始返回 |
+| `debug_prompts` | bool | `false` | 是否 Debug 输出发往 LLM 的请求与响应 |
 
 `plugins.agent.enabled` 由 kei 读取（布尔或标量简写），不进入插件配置，也不在上表内。
 

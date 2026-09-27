@@ -327,10 +327,6 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
 	}
-	if p.cfg.debugPrompts {
-		p.log.Debug("agent prompt", "prompt", truncateRunes(req.System+"\n"+req.User, 2048))
-	}
-
 	content, err := p.completer.Complete(p.ctx, req)
 	if err != nil {
 		p.bumpLLMError(st)

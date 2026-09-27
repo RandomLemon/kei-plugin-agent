@@ -45,6 +45,7 @@ type openaiClient struct { // 实现 completer
 	log     *slog.Logger
 	retries int
 	timeout time.Duration // llm_timeout，每次尝试独立派生
+	debug   bool          // debug_prompts：Debug 输出请求与响应
 }
 ```
 
@@ -82,7 +83,7 @@ type openaiClient struct { // 实现 completer
 
 - **永不记录 `llm_api_key`**。
 - 日志只出现 `base_url` 的 **host** 与 `llm_model`，不出现完整 URL、不出现查询串。
-- `debug_prompts=true` 时以 Debug 输出 LLM 返回：成功为 `agent llm 返回`（`content=`，按 rune 截断 2048），解析失败为 `agent llm 响应无法解析`（响应体片段，截断 256 字节）；两条日志均带 `host`/`model`。
+- `debug_prompts=true` 时以 Debug 输出 LLM 请求与响应：`agent llm 请求`（请求体 JSON）与 `agent llm 响应`（`status` + 响应体 JSON），`body` 均按 rune 截断 2048，均带 `host`/`model`。
 - `debug_prompts=true` 时也不记录 `Authorization` 头（`llm_extra_headers` 同理，只记头名不记值）。
 - 失败响应体片段截断到 256 字节后再记录。
 

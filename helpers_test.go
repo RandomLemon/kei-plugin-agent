@@ -76,6 +76,21 @@ func (c *logCapture) hasAttr(key string, val any) bool {
 	return false
 }
 
+// attrOf 返回最后一条 msg 日志中 key 的字符串值，不存在返回 ""。
+func (c *logCapture) attrOf(msg, key string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.records) - 1; i >= 0; i-- {
+		r := c.records[i]
+		if r["msg"] != msg {
+			continue
+		}
+		s, _ := r[key].(string)
+		return s
+	}
+	return ""
+}
+
 // ---- 假 BotAPI ----
 
 type sentMessage struct {

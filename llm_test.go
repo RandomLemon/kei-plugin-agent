@@ -202,22 +202,34 @@ func debugClient(t *testing.T, url string, debug bool) (*openaiClient, *logCaptu
 	return c, cap
 }
 
-func TestOpenAIClientDebugLogsReturn(t *testing.T) {
+func TestOpenAIClientDebugLogsRequestAndResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"打球可以啊"}}]}`))
 	}))
 	defer srv.Close()
 
 	c, cap := debugClient(t, srv.URL, true)
-	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
+	got, err := c.Complete(context.Background(), completionRequest{System: "s", User: "u", Temperature: 0.5, MaxTokens: 10})
+	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if !cap.hasMsg("agent llm 返回") || !cap.hasAttr("content", "打球可以啊") {
-		t.Fatalf("缺少 LLM 返回 Debug 日志")
+	if got != "打球可以啊" {
+		t.Fatalf("content = %q", got)
+	}
+	reqBody := cap.attrOf("agent llm 请求", "body")
+	if !strings.Contains(reqBody, `"content":"u"`) || !strings.Contains(reqBody, `"max_tokens":10`) {
+		t.Fatalf("请求日志缺少请求体: %q", reqBody)
+	}
+	respBody := cap.attrOf("agent llm 响应", "body")
+	if !strings.Contains(respBody, "打球可以啊") {
+		t.Fatalf("响应日志缺少响应体: %q", respBody)
+	}
+	if !cap.hasAttr("status", int64(http.StatusOK)) {
+		t.Fatal("响应日志缺少 status")
 	}
 }
 
-func TestOpenAIClientDebugOffNoReturnLog(t *testing.T) {
+func TestOpenAIClientDebugOffSilent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
@@ -227,22 +239,35 @@ func TestOpenAIClientDebugOffNoReturnLog(t *testing.T) {
 	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if cap.hasMsg("agent llm 返回") {
-		t.Fatal("debug_prompts=false 时不应输出返回日志")
+	if cap.hasMsg("agent llm 请求") || cap.hasMsg("agent llm 响应") {
+		t.Fatal("debug_prompts=false 时不应输出请求/响应日志")
 	}
 }
 
-func TestOpenAIClientDebugLogsUnparseableBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"id":"x"}`))
-	}))
-	defer srv.Close()
-
-	c, cap := debugClient(t, srv.URL, true)
-	if _, err := c.Complete(context.Background(), completionRequest{}); err == nil {
-		t.Fatal("应返回错误")
+func TestOpenAIClientDebugLogsErrorResponseBody(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"http 400", http.StatusBadRequest, "bad request"},
+		{"不可解析", http.StatusOK, `{"id":"x"}`},
 	}
-	if !cap.hasMsg("agent llm 响应无法解析") || !cap.hasAttr("body", `{"id":"x"}`) {
-		t.Fatalf("缺少解析失败 Debug 日志")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c, cap := debugClient(t, srv.URL, true)
+			if _, err := c.Complete(context.Background(), completionRequest{}); err == nil {
+				t.Fatal("应返回错误")
+			}
+			if got := cap.attrOf("agent llm 响应", "body"); got != tc.body {
+				t.Fatalf("响应日志 body = %q", got)
+			}
+		})
 	}
 }
