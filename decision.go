@@ -338,9 +338,6 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		_ = p.skipLog(st.key, "llm_error", sender)
 		return
 	}
-	if p.cfg.debugPrompts {
-		p.log.Debug("agent raw", "raw", truncateRunes(content, 2048))
-	}
 	if p.ctx.Err() != nil {
 		return
 	}

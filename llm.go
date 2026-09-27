@@ -34,6 +34,7 @@ type openaiClient struct { // 实现 completer
 	log     *slog.Logger
 	retries int
 	timeout time.Duration
+	debug   bool // 是否以 Debug 输出 LLM 返回（debug_prompts）
 }
 
 // 确保 openaiClient 满足 completer。
@@ -50,6 +51,7 @@ func newOpenAIClient(cfg *config, hc *http.Client, log *slog.Logger) *openaiClie
 		log:     log,
 		retries: cfg.llmMaxRetries,
 		timeout: cfg.llmTimeout,
+		debug:   cfg.debugPrompts,
 	}
 }
 
@@ -134,7 +136,13 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	}
 	content, err := parseCompletion(data)
 	if err != nil {
+		if c.debug {
+			c.log.Debug("agent llm 响应无法解析", "host", hostOf(c.baseURL), "model", c.model, "body", snippet(data))
+		}
 		return "", false, err
+	}
+	if c.debug {
+		c.log.Debug("agent llm 返回", "host", hostOf(c.baseURL), "model", c.model, "content", truncateRunes(content, 2048))
 	}
 	return content, false, nil
 }

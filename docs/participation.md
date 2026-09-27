@@ -243,7 +243,7 @@ generate(st, epoch, history):
   return log(decision="reply", kind=st.pendingKind)
 ```
 
-`log(...)` 的输出契约：`decision=reply` 行含 `kind=addressed|random`；`decision=skip` 行必须含 `reason="<token>"`，`channel=<key>`、`sender=<id>` 为固定字段；`debug_prompts=true` 时在 `generate` 内额外输出 `prompt=` 与 `raw=`（各截断 2048 字符）。
+`log(...)` 的输出契约：`decision=reply` 行含 `kind=addressed|random`；`decision=skip` 行必须含 `reason="<token>"`，`channel=<key>`、`sender=<id>` 为固定字段；`debug_prompts=true` 时在 `generate` 内额外输出 `prompt=`（截断 2048 字符），LLM 原始返回由 LLM 客户端以 `agent llm 返回` 输出（`content=`，截断 2048 字符，见 [`llm.md`](llm.md) §9.5）。
 
 ### 状态机
 
@@ -295,7 +295,7 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 | `send_error` | 发送失败 |
 | `stale` | `epoch` 变化，结果被丢弃 |
 
-`debug_prompts=true` 时额外以 Debug 输出渲染后的提示词（截断 2048 字符）与 LLM 原始返回。
+`debug_prompts=true` 时额外以 Debug 输出渲染后的提示词（截断 2048 字符）；LLM 原始返回由 LLM 客户端输出（见 [`llm.md`](llm.md) §9.5）。
 
 ## 7.8 会话名单策略
 

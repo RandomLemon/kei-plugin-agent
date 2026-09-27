@@ -64,6 +64,18 @@ func (c *logCapture) hasMsg(msg string) bool {
 	return false
 }
 
+// hasAttr 判断是否出现带指定属性值的日志。
+func (c *logCapture) hasAttr(key string, val any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r[key] == val {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- 假 BotAPI ----
 
 type sentMessage struct {

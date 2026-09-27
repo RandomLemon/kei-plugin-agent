@@ -82,6 +82,7 @@ type openaiClient struct { // 实现 completer
 
 - **永不记录 `llm_api_key`**。
 - 日志只出现 `base_url` 的 **host** 与 `llm_model`，不出现完整 URL、不出现查询串。
+- `debug_prompts=true` 时以 Debug 输出 LLM 返回：成功为 `agent llm 返回`（`content=`，按 rune 截断 2048），解析失败为 `agent llm 响应无法解析`（响应体片段，截断 256 字节）；两条日志均带 `host`/`model`。
 - `debug_prompts=true` 时也不记录 `Authorization` 头（`llm_extra_headers` 同理，只记头名不记值）。
 - 失败响应体片段截断到 256 字节后再记录。
 

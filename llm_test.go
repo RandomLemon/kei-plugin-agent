@@ -188,3 +188,61 @@ func TestOpenAIClientLargeBodyLimited(t *testing.T) {
 		t.Fatal("超过 1 MiB 的响应应解析失败")
 	}
 }
+
+// debugClient 构造带日志捕获的客户端，debug 控制 debug_prompts。
+func debugClient(t *testing.T, url string, debug bool) (*openaiClient, *logCapture) {
+	t.Helper()
+	cap := &logCapture{}
+	c := newOpenAIClient(&config{
+		llmBaseURL:   url,
+		llmModel:     "m",
+		llmTimeout:   2 * time.Second,
+		debugPrompts: debug,
+	}, http.DefaultClient, slog.New(cap))
+	return c, cap
+}
+
+func TestOpenAIClientDebugLogsReturn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"打球可以啊"}}]}`))
+	}))
+	defer srv.Close()
+
+	c, cap := debugClient(t, srv.URL, true)
+	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !cap.hasMsg("agent llm 返回") || !cap.hasAttr("content", "打球可以啊") {
+		t.Fatalf("缺少 LLM 返回 Debug 日志")
+	}
+}
+
+func TestOpenAIClientDebugOffNoReturnLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c, cap := debugClient(t, srv.URL, false)
+	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if cap.hasMsg("agent llm 返回") {
+		t.Fatal("debug_prompts=false 时不应输出返回日志")
+	}
+}
+
+func TestOpenAIClientDebugLogsUnparseableBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"x"}`))
+	}))
+	defer srv.Close()
+
+	c, cap := debugClient(t, srv.URL, true)
+	if _, err := c.Complete(context.Background(), completionRequest{}); err == nil {
+		t.Fatal("应返回错误")
+	}
+	if !cap.hasMsg("agent llm 响应无法解析") || !cap.hasAttr("body", `{"id":"x"}`) {
+		t.Fatalf("缺少解析失败 Debug 日志")
+	}
+}
