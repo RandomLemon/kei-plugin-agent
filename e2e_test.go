@@ -17,6 +17,9 @@ import (
 type pluginSink struct{ p *Plugin }
 
 func (s *pluginSink) Emit(ctx context.Context, ev *bot.Event) error {
+	if ev.Message != nil && ev.Message.Kind == bot.MessagePrivate {
+		return s.p.handlePrivateMessage(ctx, ev, bot.NewNoopReply())
+	}
 	return s.p.handleGroupMessage(ctx, ev, bot.NewNoopReply())
 }
 
@@ -70,6 +73,58 @@ func TestE2EMockAdapterInject(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if env.fake.count() != before {
 		t.Fatalf("off 后仍发送: %d -> %d", before, env.fake.count())
+	}
+	if err := ad.Stop(context.Background()); err != nil {
+		t.Fatalf("adapter stop: %v", err)
+	}
+}
+
+// TestE2EMockAdapterPrivate 用 mock 适配器注入私聊事件（kind=private），
+// 验证私聊走独立 Handler 且发送目标是私聊。
+func TestE2EMockAdapterPrivate(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		fastConfig(c)
+		c["private_policy"] = "open"
+	})
+
+	ad := mock.New(mock.Options{
+		Name:       "bot1",
+		Platform:   "mock",
+		ListenAddr: "127.0.0.1:0",
+		Logger:     slog.Default(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ad.Start(ctx, &pluginSink{p: env.p}) }()
+	addr := waitAddr(t, ad)
+
+	inject := func(body string) {
+		t.Helper()
+		resp, err := http.Post("http://"+addr+"/inject", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("inject: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("inject status = %d", resp.StatusCode)
+		}
+	}
+
+	// 首条过短消息只为建立并加载会话状态（loading 或 too_short 都不会回复）。
+	inject(`{"kind":"private","text":"a","user_id":"u1","user_name":"张三","platform":"mock","bot_id":"bot1"}`)
+	waitStateLoaded(t, env, "mock:bot1:user:u1")
+	inject(`{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三","platform":"mock","bot_id":"bot1"}`)
+
+	if !env.waitSends(1, 3*time.Second) {
+		t.Fatal("私聊注入后应触发一次回复")
+	}
+	sent := env.fake.at(0)
+	if sent.Target.Kind != bot.MessagePrivate || sent.Target.UserID != "u1" || sent.Target.ChannelID != "" {
+		t.Fatalf("发送目标错误: %+v", sent.Target)
+	}
+	if got := plainText(sent.Msg); got != "打球可以啊" {
+		t.Fatalf("发送内容 = %q", got)
 	}
 	if err := ad.Stop(context.Background()); err != nil {
 		t.Fatalf("adapter stop: %v", err)

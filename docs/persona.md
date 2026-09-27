@@ -88,9 +88,33 @@ reg.OnCommand("agent", p.handleCommand,
 | `on` | 置 `disabled=false`，持久化 |
 | `off` | 置 `disabled=true`，停止定时器，`epoch++`，持久化 |
 | `reset` | 清历史/覆盖/计数器，置 `on`，`epoch++`，持久化 |
+| `policy` | 打印群聊/私聊名单模式与名单条数 |
+| `policy <group\|private> <mode>` | 设置该侧模式（`off`/`open`/`whitelist`/`blacklist`）→ 写穿透持久化 |
+| `list` | 打印群聊/私聊名单 |
+| `list <group\|private>` | 打印单侧名单 |
+| `list <group\|private> add\|del <id>` | 追加/移除名单项 → 写穿透持久化 |
 | 未知子命令 | 回用法文本 |
 
 命令回复用注入的 `Reply`；命令**不做 LLM 调用、不进历史**。
+
+用法文本（逐字）：
+
+```text
+用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]
+```
+
+`policy`/`list` 的输出行（逐字，语义与空名单行为见 [`participation.md`](participation.md) §7.8）：
+
+```text
+/agent policy                      → agent: group=open(0) · private=off(0)
+/agent policy group whitelist       → agent: group=whitelist(0)
+/agent list                         → agent: group=[g1 g2] private=[]
+/agent list group add g9            → agent: group=[g1 g2 g9]
+```
+
+- 这两个子命令同样只走 `bot.WithAdmin()`（仅管理员），不做 LLM 调用、不进历史。
+- 参数非法或缺参回用法文本；`add` 已存在、`del` 不存在均幂等（回同一行，不产生写穿透）。
+- 策略是**插件级**（不是每会话），持久化键 `agent:policy`（[`architecture.md`](architecture.md) §4.4）。
 
 **`/agent status` 输出（字段顺序固定，`·` 分隔，逐字）**：
 
@@ -113,30 +137,31 @@ agent: persona=tsundere 来源=override
 `persona_template` 默认值**逐字**为下面这段：
 
 ```text
-你正在一个群聊里聊天。
+你正在一个{{chat_kind}}里聊天。
 
 # 你是谁
 {{persona}}
 
 # 你在哪
-群「{{channel_name}}」（{{platform}} / {{bot_name}}），现在时间 {{now}}，最近发言的人：{{last_sender}}。
+{{chat_kind}}「{{channel_name}}」（{{platform}} / {{bot_name}}），现在时间 {{now}}，最近发言的人：{{last_sender}}。
 
 # 怎么说话
-- 像群里一个普通真人：口语、短，通常一到两句话，最多不超过 {{max_chars}} 个字。
+- 像一个普通真人：口语、短，通常一到两句话，最多不超过 {{max_chars}} 个字。
 - 不要用 Markdown、列表、标题；不要自称 AI、机器人、助手、模型，也不要解释自己是谁。
 - 只依据下面给出的聊天记录，不要编造没发生的事；不确定就少说或不说。
-- 群里可能同时在聊别的话题；只有你觉得此刻插一句自然，才说话。
+- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。
 - 决定说话时直接输出你要发的那句话，不要加引号，不要加「{{persona_name}}:」这类前缀。
 - 决定不插话时，只输出 {{skip_token}}，不要输出其他任何内容。
 ```
 
-**占位符全集（恰好这 10 个）**：
+**占位符全集（恰好这 11 个）**：
 
 | 占位符 | 取值 |
 | --- | --- |
 | `{{persona}}` | 当前人格的 `prompt` |
 | `{{persona_name}}` | 当前人格名 |
-| `{{channel_name}}` | `ev.Channel.Name`；空则回落 `{{channel_id}}` |
+| `{{chat_kind}}` | 会话类型文案：群聊为 `群聊`、私聊为 `私聊` |
+| `{{channel_name}}` | `ev.Channel.Name`（私聊取发送者显示名）；空则回落 `{{channel_id}}`；再空则回落 `私聊` |
 | `{{channel_id}}` | `ev.Channel.ID` |
 | `{{platform}}` | `ev.Platform` |
 | `{{bot_name}}` | `ev.BotID` |
@@ -172,7 +197,7 @@ type Turn struct {
   2. 拼接前对每个 `SegAt` 前置 `@<name 或 user_id> `（`Data[bot.KeyUserName]` 为空时用 `Data[bot.KeyUserID]`）；
   3. `SegReply` 渲染为 `[引用]` 前缀；
   4. 文本为空时按首个非文本段回落：`[图片]`/`[表情]`/`[文件]`/`[卡片]`/`[引用]`/`[消息]`。
-- **最终 user 消息内容** = `[群聊记录]` 头 + 每行一条（按时间序，含最新一条）+ 尾部空行。
+- **最终 user 消息内容** = 头 + 每行一条（按时间序，含最新一条）+ 尾部空行。头按会话类型渲染：群聊 `[群聊记录]`、私聊 `[私聊记录]`。
 - **裁剪**：超过 `context_max_messages` 条、或超过 `llm_history_max_chars` 字符（按 **rune** 计）时从最旧丢弃，**始终保留最新一条**。
 - `Turn.At` 取 `ev.Time`，为零值时取 `p.now()`。
 
@@ -204,7 +229,7 @@ type Turn struct {
 | 5 | 所有换行换成空格（群聊一行话），连续空格压成一个 | — |
 | 6 | 按 rune 截断到 `reply_max_chars`（硬截断，不加省略号） | — |
 | 7 | `reply_dedupe=true` 且与最近 3 条自己发送内容完全相同 → 丢弃 | `duplicate_reply` |
-| 8 | `reply_mention_sender=true` 且本轮触发是寻址消息 → 在文本段前插入 `pkg/message.At(发送者 ID)` 段 | — |
+| 8 | `reply_mention_sender=true` 且本轮触发是寻址消息 → 在文本段前插入 `pkg/message.At(发送者 ID)` 段（**仅群聊**；私聊不加） | — |
 
 输入 → 输出样例：
 

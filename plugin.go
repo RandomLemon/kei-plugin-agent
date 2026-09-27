@@ -38,6 +38,9 @@ type Plugin struct {
 	mu       sync.RWMutex
 	channels map[string]*channelState
 
+	policyMu sync.RWMutex
+	policy   policyState
+
 	sem      *semaphore
 	replyIDs *idRing
 
@@ -82,6 +85,12 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	p.now = time.Now
 	p.randFloat = rand.Float64
 	p.channels = make(map[string]*channelState)
+	p.policy = policyState{
+		groupMode:   cfg.groupPolicy,
+		groupList:   cfg.groupList,
+		privateMode: cfg.privatePolicy,
+		privateList: cfg.privateList,
+	}
 	p.sem = newSemaphore(cfg.limitsMaxConcurrent)
 	p.replyIDs = newIDRing(replyIDRingSize)
 	p.completer = newOpenAIClient(cfg, pc.HTTPClient, log)
@@ -89,14 +98,23 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
 		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("agent:group"))
 
+	reg.OnEvent(bot.EventMessage, p.handlePrivateMessage,
+		bot.WithKind(bot.MessagePrivate), bot.WithPriority(0), bot.WithID("agent:private"))
+
 	reg.OnCommand("agent", p.handleCommand,
 		bot.WithAdmin(), bot.WithPriority(100), bot.WithID("agent:admin"))
 	return nil
 }
 
-// Start 保存插件级 ctx 并启动后台能力。
+// Start 保存插件级 ctx、同步加载名单策略并启动后台能力。
+//
+// kei 传给 Start 的 ctx 是「阶段上下文」：阶段函数返回后立即被 cancel
+// （见 internal/pluginmgr/manager.go 的 run）。因此这里用 context.WithoutCancel
+// 摘掉它的取消与超时、只保留值，再由 Stop 经 p.cancel 终止全部后台工作；
+// 直接用阶段 ctx 会让所有异步链路（懒加载、写穿透、LLM、发送）当场失效。
 func (p *Plugin) Start(ctx context.Context) error {
-	p.ctx, p.cancel = context.WithCancel(ctx)
+	p.ctx, p.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	p.loadPolicy(ctx)
 	return nil
 }
 

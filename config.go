@@ -15,7 +15,24 @@ const (
 	personaDefaultName = "default"
 	defaultLLMBaseURL  = "https://api.openai.com/v1"
 	defaultSkipToken   = "[SKIP]"
+
+	policyOff       = "off"
+	policyOpen      = "open"
+	policyWhitelist = "whitelist"
+	policyBlacklist = "blacklist"
+
+	// policyModeReason 是策略模式校验失败的原因短语。
+	policyModeReason = "必须是 off|open|whitelist|blacklist 之一"
 )
+
+// validPolicyMode 判断策略模式是否合法。
+func validPolicyMode(m string) bool {
+	switch m {
+	case policyOff, policyOpen, policyWhitelist, policyBlacklist:
+		return true
+	}
+	return false
+}
 
 // quietHoursPattern 匹配 HH:MM-HH:MM。
 var quietHoursPattern = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`)
@@ -51,6 +68,11 @@ type config struct {
 	triggerMinChars   int
 	ignoreBots        bool
 	respondToCommands bool
+
+	groupPolicy   string
+	groupList     []string
+	privatePolicy string
+	privateList   []string
 
 	mentionReplyProbability float64
 	mentionMinInterval      time.Duration
@@ -142,6 +164,11 @@ func loadConfig(c *bot.Config) (*config, error) {
 	cfg.replyDedupe = r.boolean("reply_dedupe", true)
 	cfg.debugPrompts = r.boolean("debug_prompts", false)
 
+	cfg.groupPolicy = r.str("group_policy", policyOpen)
+	cfg.groupList = c.Strings("group_list")
+	cfg.privatePolicy = r.str("private_policy", policyOff)
+	cfg.privateList = c.Strings("private_list")
+
 	if cfg.triggerMinChars, err = r.intKey("trigger_min_chars", 2, "必须 >= 0"); err != nil {
 		return nil, err
 	}
@@ -171,11 +198,14 @@ func loadConfig(c *bot.Config) (*config, error) {
 	}
 
 	// ---- 校验 ----
+	if !validPolicyMode(cfg.groupPolicy) {
+		return nil, cfgErr("group_policy", cfg.groupPolicy, policyModeReason)
+	}
+	if !validPolicyMode(cfg.privatePolicy) {
+		return nil, cfgErr("private_policy", cfg.privatePolicy, policyModeReason)
+	}
 	if cfg.llmBaseURL == "" {
 		return nil, cfgErr("llm_base_url", "", "不能为空")
-	}
-	if cfg.llmAPIKey == "" {
-		return nil, cfgErr("llm_api_key", "", "不能为空")
 	}
 	if cfg.llmModel == "" {
 		return nil, cfgErr("llm_model", "", "不能为空")

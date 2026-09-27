@@ -46,6 +46,20 @@ func TestFilterReasons(t *testing.T) {
 			t.Fatal("want not_group")
 		}
 	})
+	t.Run("not_private", func(t *testing.T) {
+		env := newTestEnv(t, nil, nil)
+		_ = env.deliverPrivate(groupEvent("g1", "u1", "张三", "hi"))
+		if !env.cap.has("not_private") {
+			t.Fatal("want not_private")
+		}
+	})
+	t.Run("not_allowed", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) { c["group_policy"] = "off" })
+		_ = env.deliver(groupEvent("g1", "u1", "张三", "hi"))
+		if !env.cap.has("not_allowed") {
+			t.Fatal("want not_allowed")
+		}
+	})
 	t.Run("bot_sender", func(t *testing.T) {
 		env := newTestEnv(t, nil, nil)
 		env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
@@ -429,5 +443,235 @@ func TestStopIsIdempotent(t *testing.T) {
 	}
 	if err := env.p.Stop(t.Context()); err != nil {
 		t.Fatalf("二次 Stop: %v", err)
+	}
+}
+
+func TestGroupPolicyFilter(t *testing.T) {
+	t.Run("whitelist", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["group_policy"] = "whitelist"
+			c["group_list"] = []any{"g1"}
+		})
+		env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		if !env.waitSends(1, 2*time.Second) {
+			t.Fatal("白名单内应回复")
+		}
+		_ = env.deliver(atEvent("g2", "u1", "张三", "在吗"))
+		if !env.cap.has("not_allowed") {
+			t.Fatal("want not_allowed")
+		}
+		if env.fake.count() != 1 {
+			t.Fatalf("白名单外不应发送, count=%d", env.fake.count())
+		}
+	})
+	t.Run("blacklist", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["group_policy"] = "blacklist"
+			c["group_list"] = []any{"g1"}
+		})
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		if !env.cap.has("not_allowed") {
+			t.Fatal("黑名单内应拒绝")
+		}
+		env.waitLoaded(atEvent("g2", "u1", "张三", "hi"))
+		_ = env.deliver(atEvent("g2", "u1", "张三", "在吗"))
+		if !env.waitSends(1, 2*time.Second) {
+			t.Fatal("黑名单外应回复")
+		}
+	})
+}
+
+func TestPolicyRejectSkipsStateAndHistory(t *testing.T) {
+	t.Run("group", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) { c["group_policy"] = "whitelist" })
+		_ = env.deliver(groupEvent("g1", "u1", "张三", "hi"))
+		if !env.cap.has("not_allowed") {
+			t.Fatal("want not_allowed")
+		}
+		if n := channelCount(env.p); n != 0 {
+			t.Fatalf("被拒会话不应建状态, channels=%d", n)
+		}
+	})
+	t.Run("private", func(t *testing.T) {
+		env := newTestEnv(t, nil, nil) // private_policy 默认 off
+		_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+		if !env.cap.has("not_allowed") {
+			t.Fatal("want not_allowed")
+		}
+		if n := channelCount(env.p); n != 0 {
+			t.Fatalf("被拒会话不应建状态, channels=%d", n)
+		}
+	})
+}
+
+func channelCount(p *Plugin) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.channels)
+}
+
+func TestPrivatePolicyDefaultOff(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+	if !env.cap.has("not_allowed") {
+		t.Fatal("want not_allowed")
+	}
+	if env.fake.count() != 0 {
+		t.Fatalf("默认关闭私聊不应发送, count=%d", env.fake.count())
+	}
+}
+
+func TestPrivateReply(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		fastConfig(c)
+		c["private_policy"] = "open"
+	})
+	env.waitLoaded(privateEvent("u1", "张三", "hi"))
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("私聊应回复")
+	}
+	sent := env.fake.at(0)
+	if sent.Target.Kind != bot.MessagePrivate {
+		t.Fatalf("Kind = %q, want private", sent.Target.Kind)
+	}
+	if sent.Target.UserID != "u1" {
+		t.Fatalf("UserID = %q, want u1", sent.Target.UserID)
+	}
+	if sent.Target.ChannelID != "" {
+		t.Fatalf("ChannelID = %q, want empty", sent.Target.ChannelID)
+	}
+	if sent.Target.BotID != "bot1" {
+		t.Fatalf("BotID = %q, want bot1", sent.Target.BotID)
+	}
+	if got := plainText(sent.Msg); got != "打球可以啊" {
+		t.Fatalf("text = %q", got)
+	}
+}
+
+func TestPrivateSkipsRandomPath(t *testing.T) {
+	t.Run("random_enabled=false", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["private_policy"] = "open"
+			c["random_enabled"] = false
+		})
+		env.waitLoaded(privateEvent("u1", "张三", "hi"))
+		_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+		if !env.waitSends(1, 2*time.Second) {
+			t.Fatal("私聊不依赖 random_enabled")
+		}
+	})
+	t.Run("probability 0", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["private_policy"] = "open"
+			c["mention_reply_probability"] = 0.0
+		})
+		env.setRand(0)
+		env.waitLoaded(privateEvent("u1", "张三", "hi"))
+		_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+		if !env.cap.has("probability") {
+			t.Fatal("want probability")
+		}
+		if env.fake.count() != 0 {
+			t.Fatalf("概率未命中不应发送, count=%d", env.fake.count())
+		}
+	})
+}
+
+func TestPrivateAlwaysAddressedCooldown(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		fastConfig(c)
+		c["private_policy"] = "open"
+		c["mention_min_interval"] = "90s"
+	})
+	env.waitLoaded(privateEvent("u1", "张三", "hi"))
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("首条应回复")
+	}
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "再说一次"))
+	if !env.cap.has("cooldown") {
+		t.Fatal("want cooldown")
+	}
+	if env.fake.count() != 1 {
+		t.Fatalf("冷却期内不应发送, count=%d", env.fake.count())
+	}
+}
+
+func TestPrivateWhitelist(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		fastConfig(c)
+		c["private_policy"] = "whitelist"
+		c["private_list"] = []any{"u1"}
+	})
+	env.waitLoaded(privateEvent("u1", "张三", "hi"))
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("白名单内应回复")
+	}
+	_ = env.deliverPrivate(privateEvent("u2", "李四", "在吗"))
+	if !env.cap.has("not_allowed") {
+		t.Fatal("want not_allowed")
+	}
+	if env.fake.count() != 1 {
+		t.Fatalf("白名单外不应发送, count=%d", env.fake.count())
+	}
+}
+
+func TestPrivateReplyOmitsAtSegment(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		fastConfig(c)
+		c["private_policy"] = "open"
+		c["reply_mention_sender"] = true
+	})
+	env.waitLoaded(privateEvent("u1", "张三", "hi"))
+	_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("应回复")
+	}
+	msg := env.fake.at(0).Msg
+	if msg.Kind != bot.MessagePrivate {
+		t.Fatalf("Kind = %q, want private", msg.Kind)
+	}
+	if len(msg.Segments) != 1 || msg.Segments[0].Type != bot.SegText {
+		t.Fatalf("私聊不应插入 At 段: %+v", msg.Segments)
+	}
+}
+
+func TestPrivateRuleRegistered(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	rule := env.reg.rule("agent:private")
+	if rule == nil {
+		t.Fatal("agent:private 未注册")
+	}
+	if rule.EventType != bot.EventMessage || rule.Kind != bot.MessagePrivate {
+		t.Fatalf("private 规则过滤错误: type=%q kind=%q", rule.EventType, rule.Kind)
+	}
+	group := env.reg.rule("agent:group")
+	if group == nil || group.Kind != bot.MessageGroup {
+		t.Fatalf("agent:group 规则异常: %+v", group)
+	}
+}
+
+func TestPrivatePeersHaveDistinctKeys(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) { c["private_policy"] = "open" })
+	st1 := env.waitLoaded(privateEvent("u1", "张三", "hi"))
+	st2 := env.waitLoaded(privateEvent("u2", "李四", "hi"))
+	if st1.key != "mock:bot1:user:u1" || st2.key != "mock:bot1:user:u2" {
+		t.Fatalf("会话键 = %q / %q", st1.key, st2.key)
+	}
+	if overrideKey(st1.key) == overrideKey(st2.key) {
+		t.Fatalf("私聊对端覆盖键碰撞: %q", overrideKey(st1.key))
+	}
+	if got := overrideKey(st1.key); got != "agent:override:mock:bot1:user:u1" {
+		t.Fatalf("覆盖键 = %q", got)
+	}
+	if st1.kind != bot.MessagePrivate || st1.peerUserID != "u1" {
+		t.Fatalf("状态类型错误: kind=%q peer=%q", st1.kind, st1.peerUserID)
 	}
 }

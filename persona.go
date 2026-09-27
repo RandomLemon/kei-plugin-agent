@@ -9,19 +9,19 @@ import (
 )
 
 // defaultPersonaTemplate 是内建系统提示词模板（逐字见 docs/persona.md §8.5）。
-const defaultPersonaTemplate = `你正在一个群聊里聊天。
+const defaultPersonaTemplate = `你正在一个{{chat_kind}}里聊天。
 
 # 你是谁
 {{persona}}
 
 # 你在哪
-群「{{channel_name}}」（{{platform}} / {{bot_name}}），现在时间 {{now}}，最近发言的人：{{last_sender}}。
+{{chat_kind}}「{{channel_name}}」（{{platform}} / {{bot_name}}），现在时间 {{now}}，最近发言的人：{{last_sender}}。
 
 # 怎么说话
-- 像群里一个普通真人：口语、短，通常一到两句话，最多不超过 {{max_chars}} 个字。
+- 像一个普通真人：口语、短，通常一到两句话，最多不超过 {{max_chars}} 个字。
 - 不要用 Markdown、列表、标题；不要自称 AI、机器人、助手、模型，也不要解释自己是谁。
 - 只依据下面给出的聊天记录，不要编造没发生的事；不确定就少说或不说。
-- 群里可能同时在聊别的话题；只有你觉得此刻插一句自然，才说话。
+- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。
 - 决定说话时直接输出你要发的那句话，不要加引号，不要加「{{persona_name}}:」这类前缀。
 - 决定不插话时，只输出 {{skip_token}}，不要输出其他任何内容。
 `
@@ -55,14 +55,22 @@ func (p *Plugin) personaDisplayName(name string) string {
 // renderSystemPrompt 渲染系统提示词；未知占位符原样保留。
 func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, history []Turn) string {
 	pf := p.cfg.personas[personaName]
-	platform, botID, channelName, channelID := st.info()
+	platform, botID, channelName, channelID, kind := st.info()
 	if channelName == "" {
 		channelName = channelID
+	}
+	if channelName == "" {
+		channelName = "私聊"
+	}
+	chatKind := "群聊"
+	if kind == bot.MessagePrivate {
+		chatKind = "私聊"
 	}
 	now := p.now().In(p.cfg.randomTimezone).Format("2006-01-02 15:04")
 	repl := strings.NewReplacer(
 		"{{persona}}", pf.Prompt,
 		"{{persona_name}}", personaName,
+		"{{chat_kind}}", chatKind,
 		"{{channel_name}}", channelName,
 		"{{channel_id}}", channelID,
 		"{{platform}}", platform,
@@ -82,7 +90,7 @@ func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, histor
 // renderHistoryBlock 渲染 user 消息：头 + 每行一条 + 尾部空行。
 //
 // 超字符上限时从最旧丢弃，始终保留最新一条。
-func (p *Plugin) renderHistoryBlock(history []Turn) string {
+func (p *Plugin) renderHistoryBlock(kind bot.MessageKind, history []Turn) string {
 	lines := make([]string, 0, len(history))
 	for _, t := range history {
 		name := t.Name
@@ -102,7 +110,11 @@ func (p *Plugin) renderHistoryBlock(history []Turn) string {
 		total -= utf8.RuneCountInString(lines[0]) + 1
 		lines = lines[1:]
 	}
-	return "[群聊记录]\n" + strings.Join(lines, "\n") + "\n\n"
+	head := "[群聊记录]"
+	if kind == bot.MessagePrivate {
+		head = "[私聊记录]"
+	}
+	return head + "\n" + strings.Join(lines, "\n") + "\n\n"
 }
 
 // lastSender 返回历史中最后一条他人消息的显示名。

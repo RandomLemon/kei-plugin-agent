@@ -17,6 +17,10 @@
 | `trigger_min_chars` | int | `2` | 短于该长度的文本只记历史不参与（按 rune 计） |
 | `ignore_bots` | bool | `true` | 忽略机器人发送者 |
 | `respond_to_commands` | bool | `false` | 是否允许其它 `/xxx` 命令触发 LLM（`/agent` 永不触发） |
+| `group_policy` | string | `open` | 群聊名单模式：`off`（全部不参与）/`open`（全部参与）/`whitelist`（仅 `group_list` 内）/`blacklist`（`group_list` 外） |
+| `group_list` | []string | `[]` | 群聊名单，匹配 `ev.Channel.ID`（频道 ID） |
+| `private_policy` | string | `off` | 私聊名单模式：语义同 `group_policy`，但匹配 `private_list` |
+| `private_list` | []string | `[]` | 私聊名单，匹配 `ev.Sender.ID`（发送者 ID） |
 | `mention_reply_probability` | float | `1.0` | 被寻址时的回复概率 |
 | `mention_min_interval` | duration | `10s` | 被寻址时的最小回复间隔（自 `lastAgentAt` 起算） |
 | `random_enabled` | bool | `true` | 是否允许非寻址随机插话 |
@@ -32,7 +36,7 @@
 | `context_max_messages` | int | `20` | 每会话保留的历史条数 |
 | `context_max_channels` | int | `512` | 内存中最多跟踪的会话数（LRU 淘汰） |
 | `llm_base_url` | string | `https://api.openai.com/v1` | OpenAI 兼容 API 根地址 |
-| `llm_api_key` | string | 无（必填） | 密钥；建议用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入 |
+| `llm_api_key` | string | `""` | 密钥，可留空：留空时不发送 `Authorization` 头（本地/无鉴权推理服务）；建议用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入 |
 | `llm_model` | string | 无（必填） | 模型名 |
 | `llm_temperature` | float | `0.8` | 全局采样温度 |
 | `llm_max_tokens` | int | `200` | 全局最大生成 token |
@@ -95,6 +99,12 @@ plugins:
     ignore_bots: true
     respond_to_commands: false
 
+    # ---- 名单策略 ----
+    group_policy: "open"        # off | open | whitelist | blacklist（匹配 channel_id）
+    group_list: []
+    private_policy: "off"       # off | open | whitelist | blacklist（匹配 user_id）
+    private_list: []
+
     # ---- 寻址 ----
     mention_reply_probability: 1.0
     mention_min_interval: "10s"
@@ -119,7 +129,7 @@ plugins:
 
     # ---- LLM ----
     llm_base_url: "https://api.openai.com/v1"
-    llm_api_key: "sk-replace-me"
+    llm_api_key: "sk-replace-me"   # 可留空：留空则不发送 Authorization 头（本地推理服务）
     llm_model: "gpt-4o-mini"
     llm_temperature: 0.8
     llm_max_tokens: 200
@@ -163,7 +173,7 @@ export KEI_PLUGINS_AGENT_RANDOM_PROBABILITY=0.3
 export KEI_PLUGINS_AGENT_DEBUG_PROMPTS=true
 ```
 
-限制：`personas`/`bindings`/`llm_extra_headers` 这类**复合结构不支持环境变量覆盖**（环境变量只能写扁平标量键），必须写在 YAML 里。
+限制：`personas`/`bindings`/`llm_extra_headers`/`group_list`/`private_list` 这类**复合结构不支持环境变量覆盖**（环境变量只能写扁平标量键），必须写在 YAML 里。模式键 `group_policy`/`private_policy` 是标量，可用环境变量覆盖（如 `KEI_PLUGINS_AGENT_PRIVATE_POLICY=open`）。
 
 ## 10.4 校验规则
 
@@ -175,17 +185,17 @@ export KEI_PLUGINS_AGENT_DEBUG_PROMPTS=true
 agent: 配置错误 <key>=<值>: <原因>
 ```
 
-`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须是 HH:MM-HH:MM 格式`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。
+`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。
 
 固定示例：
 
 ```text
-agent: 配置错误 llm_api_key=: 不能为空
 agent: 配置错误 default_persona=cat: 未在 personas 中定义
 agent: 配置错误 personas=: 必须是非空对象
 agent: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数
 agent: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式
 agent: 配置错误 context_max_messages=0: 必须 >= 1
+agent: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一
 ```
 
 逐键规则（覆盖 §10.1 全部键）：
@@ -201,6 +211,10 @@ agent: 配置错误 context_max_messages=0: 必须 >= 1
 | `trigger_min_chars` | 必须 >= 0 |
 | `ignore_bots` | 无额外校验 |
 | `respond_to_commands` | 无额外校验 |
+| `group_policy` | 必须是 `off`\|`open`\|`whitelist`\|`blacklist` 之一，否则 `必须是 off\|open\|whitelist\|blacklist 之一` |
+| `group_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8） |
+| `private_policy` | 必须是 `off`\|`open`\|`whitelist`\|`blacklist` 之一，否则 `必须是 off\|open\|whitelist\|blacklist 之一` |
+| `private_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8） |
 | `mention_reply_probability` | 必须是 0..1 之间的小数 |
 | `mention_min_interval` | 必须 >= 0 |
 | `random_enabled` | 无额外校验 |
@@ -216,7 +230,7 @@ agent: 配置错误 context_max_messages=0: 必须 >= 1
 | `context_max_messages` | 必须 >= 1 |
 | `context_max_channels` | 必须 >= 1 |
 | `llm_base_url` | 不能为空 |
-| `llm_api_key` | 不能为空 |
+| `llm_api_key` | 无额外校验；留空时不发送 `Authorization` 头 |
 | `llm_model` | 不能为空 |
 | `llm_temperature` | 必须 >= 0 |
 | `llm_max_tokens` | 必须 >= 1 |

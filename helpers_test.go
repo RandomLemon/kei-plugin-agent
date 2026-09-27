@@ -52,6 +52,18 @@ func (c *logCapture) has(reason string) bool {
 	return false
 }
 
+// hasMsg 判断是否出现某条日志消息。
+func (c *logCapture) hasMsg(msg string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		if r["msg"] == msg {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- 假 BotAPI ----
 
 type sentMessage struct {
@@ -223,6 +235,18 @@ func (r *fakeRegistrar) byID(id string) bot.Handler {
 	for _, rule := range r.rules {
 		if rule.ID == id {
 			return rule.Handler
+		}
+	}
+	return nil
+}
+
+// rule 返回指定 ID 的规则（含 Kind 等过滤字段），未注册返回 nil。
+func (r *fakeRegistrar) rule(id string) *bot.Rule {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rule := range r.rules {
+		if rule.ID == id {
+			return rule
 		}
 	}
 	return nil
@@ -405,6 +429,48 @@ func groupEvent(channelID, userID, userName, text string) *bot.Event {
 			Segments: []bot.Segment{{Type: bot.SegText, Data: map[string]any{bot.KeyText: text}}},
 		},
 	}
+}
+
+// privateEvent 构造一条私聊消息事件（无 Channel）。
+func privateEvent(userID, userName, text string) *bot.Event {
+	return &bot.Event{
+		ID:       "ev-p-" + userID + "-" + text,
+		Type:     bot.EventMessage,
+		Platform: "mock",
+		BotID:    "bot1",
+		Time:     time.Now(),
+		Sender:   &bot.User{ID: userID, Name: userName},
+		Message: &bot.Message{
+			Kind:     bot.MessagePrivate,
+			Segments: []bot.Segment{{Type: bot.SegText, Data: map[string]any{bot.KeyText: text}}},
+		},
+	}
+}
+
+// privateHandler 返回 agent:private 规则的 Handler。
+func (e *testEnv) privateHandler() bot.Handler {
+	h := e.reg.byID("agent:private")
+	if h == nil {
+		e.t.Fatal("agent:private 规则未注册")
+	}
+	return h
+}
+
+// deliverPrivate 把事件投递给私聊 Handler。
+func (e *testEnv) deliverPrivate(ev *bot.Event) error {
+	return e.privateHandler()(context.Background(), ev, bot.NewNoopReply())
+}
+
+// privateCommand 投递一条来自私聊的 /agent 命令，返回回复文本。
+func (e *testEnv) privateCommand(userID string, args ...string) string {
+	e.t.Helper()
+	ev := privateEvent(userID, "张三", "")
+	ev.Command = &bot.Command{Name: "agent", Args: args}
+	r := bot.NewNoopReply()
+	if err := e.commandHandler()(context.Background(), ev, r); err != nil {
+		e.t.Fatalf("private command %v: %v", args, err)
+	}
+	return r.PlainText()
 }
 
 // waitLoaded 等待会话状态完成 Storage 懒加载。

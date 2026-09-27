@@ -54,6 +54,30 @@ func TestOpenAIClientSuccess(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientNoAPIKeyOmitsAuth(t *testing.T) {
+	var gotAuth string
+	var gotHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, gotHeader = r.Header["Authorization"]
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+		})
+	}))
+	defer srv.Close()
+	c := newOpenAIClient(&config{
+		llmBaseURL: srv.URL,
+		llmModel:   "m",
+		llmTimeout: 2 * time.Second,
+	}, http.DefaultClient, slog.Default())
+	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotHeader || gotAuth != "" {
+		t.Fatalf("Authorization 头不应存在, got %q", gotAuth)
+	}
+}
+
 func TestOpenAIClientExtraHeadersOverrideAuth(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

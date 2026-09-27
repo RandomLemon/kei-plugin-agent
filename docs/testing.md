@@ -27,7 +27,22 @@ go test -race ./...
 | 用例 | 断言 |
 | --- | --- |
 | 无发送者 | 决策结果 `reason=no_sender` |
-| 非群聊（`Kind=private`） | 决策结果 `reason=not_group` |
+| 非群聊（群 Handler 收到 `Kind=private`） | 决策结果 `reason=not_group` |
+| 非私聊（私聊 Handler 收到 `Kind=group`） | 决策结果 `reason=not_private` |
+| 群/私名单四模式（`off`/`open`/`whitelist`/`blacklist`）× 名单命中/未命中/空名单 | 放行或拒绝；拒绝 → `reason=not_allowed` |
+| 被名单拒绝的群会话 / 私聊对端 | `reason=not_allowed`，且**不建会话状态、不进历史** |
+| 私聊默认（`private_policy=off`） | `reason=not_allowed`，不发送 |
+| 私聊 `private_policy=open` | 必回；`Target.Kind=private`、`Target.UserID=<发送者>`、`Target.ChannelID=""` |
+| 私聊 `random_enabled=false` | 仍回复（私聊不走随机路径） |
+| 私聊 `mention_reply_probability=0` | `reason=probability`，不发送 |
+| 私聊 `mention_min_interval` 内第二条 | `reason=cooldown` |
+| 私聊 `private_policy=whitelist` + 名单 | 名单内回复、名单外 `reason=not_allowed` |
+| 私聊 `reply_mention_sender=true` | 回复只有文本段（私聊不加 At 段） |
+| 两个私聊对端（`u1`/`u2`） | 会话键 `mock:bot1:user:<id>` 与覆盖键互不相同 |
+| `agent:private` 规则注册 | 规则存在、`EventType=EventMessage`、`Kind=MessagePrivate` |
+| `/agent policy`、`/agent list`（含 `add`/`del`/缺参/非法 scope/mode） | 输出行字面量一致；`add` 已存在、`del` 不存在幂等；非法参数回用法文本 |
+| 策略写穿透 | `Storage` 键 `agent:policy` 值含新模式/名单 |
+| `Start` 恢复策略（合法 / 非法模式 / `null` 列表 / `[]` 列表 / 坏 JSON / 无覆盖） | 合法值生效；非法模式与 `null` 列表回落配置默认值；`[]` 采用空名单；坏 JSON 不 panic 且回落默认值 |
 | 机器人发送者且 `ignore_bots=true` | 决策结果 `reason=bot_sender` |
 | 命令消息且 `respond_to_commands=false` | 决策结果 `reason=command` |
 | `/agent` 命令 | 决策结果 `reason=command`，且**不进历史** |
@@ -55,9 +70,11 @@ go test -race ./...
 | LLM 返回空串 | `reason=empty_reply` |
 | LLM 返回与最近自己发言重复且 `reply_dedupe=true` | `reason=duplicate_reply` |
 | 发送失败 | `reason=send_error`，不重排、不重发 |
-| 模板渲染 10 个占位符 | 每个占位符被替换为预期值 |
+| `Start` 阶段 ctx 在阶段返回后被 cancel（模拟 kei 的 `defer cancel()`） | 插件级 ctx 仍可用：私聊照常回复（`context.WithoutCancel` 派生） |
+| 模板渲染 11 个占位符 | 每个占位符被替换为预期值（含 `{{chat_kind}}` = `群聊`/`私聊`） |
 | 模板含未知占位符（如 `{{unknown}}`） | 原样保留 |
 | 历史渲染 6 种回落 | `[图片]` / `[表情]` / `[文件]` / `[卡片]` / `[引用]` / `[消息]` 分别命中 |
+| 历史块头按会话类型 | 群聊 `[群聊记录]`、私聊 `[私聊记录]` |
 | 历史裁剪 | 超 `context_max_messages` 或 `llm_history_max_chars`（rune）从最旧丢弃，保留最新一条 |
 | 清洗管线 8 步（见 [`persona.md`](persona.md) §8.7） | 每条输入→输出样例一致 |
 | `/agent status` | 输出固定字段顺序一行 |
@@ -71,7 +88,7 @@ go test -race ./...
 | `llm.go` 缺 choices | 返回错误 |
 | `llm.go` 超时（`llm_timeout` 极短） | 返回错误，`reason=llm_error` |
 
-reason 词表（22 个）单测覆盖：`no_sender`、`not_group`、`bot_sender`、`command`、`empty_text`、`too_short`、`channel_off`、`loading`、`not_addressed`、`min_participants`、`cooldown`、`hour_quota`、`quiet_hours`、`inflight`、`probability`、`semaphore_full`、`skipped_by_llm`、`empty_reply`、`duplicate_reply`、`llm_error`、`send_error`、`stale`。
+reason 词表（24 个）单测覆盖：`not_group`、`not_private`、`no_sender`、`not_allowed`、`bot_sender`、`command`、`empty_text`、`too_short`、`channel_off`、`loading`、`not_addressed`、`min_participants`、`cooldown`、`hour_quota`、`quiet_hours`、`inflight`、`probability`、`semaphore_full`、`skipped_by_llm`、`empty_reply`、`duplicate_reply`、`llm_error`、`send_error`、`stale`。
 
 ### 注入缝
 
@@ -126,8 +143,10 @@ PY
    期望得到一条 LLM 文本（桩服务返回 `打球可以啊`）。
 5. 注入 `/agent status`（核心 `auth.admin_users: ["u1"]`）→ 期望输出含 `persona=` 与计数器。
 6. 注入 `/agent off` 后再注入消息 → 期望 `/sent` 不再增长。
+7. 私聊（配置 `private_policy: open`）：注入 `{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三"}` → 期望 `/sent` 增长，且 `Target.Kind=private`、`Target.UserID=u1`、`Target.ChannelID` 为空（`curl -sS 127.0.0.1:18080/sent | jq '.[-1].Request.Target'`）。
+8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/agent policy`、`/agent list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；重启宿主后 `/agent policy` 应显示 `agent:policy` 覆盖值而非配置默认值。
 
-说明：mock 适配器的 HTTP `/inject` 只支持文本段，无法构造 `bot.SegAt`。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径只覆盖随机插话与命令。
+说明：mock 适配器的 HTTP `/inject` 支持 `kind`（缺省 `group`，可传 `private`；`private` 时不构造 `Channel`）与任意文本，但**无法构造 `bot.SegAt`**。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径覆盖随机插话、命令与私聊（`e2e_test.go` 的 `TestE2EMockAdapterPrivate`）。`/sent` 的每条记录含完整 `Request.Target`，可断言 `Kind`/`ChannelID`/`UserID`（私聊发送 `ChannelID` 为空）。
 
 ## 11.4 竞态与优雅关闭
 

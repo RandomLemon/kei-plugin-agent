@@ -33,6 +33,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 		{"trigger_min_chars", cfg.triggerMinChars, 2},
 		{"ignore_bots", cfg.ignoreBots, true},
 		{"respond_to_commands", cfg.respondToCommands, false},
+		{"group_policy", cfg.groupPolicy, "open"},
+		{"private_policy", cfg.privatePolicy, "off"},
 		{"mention_reply_probability", cfg.mentionReplyProbability, 1.0},
 		{"mention_min_interval", cfg.mentionMinInterval, 10 * time.Second},
 		{"random_enabled", cfg.randomEnabled, true},
@@ -60,8 +62,24 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if pf.DisplayName != "default" || pf.Temperature != 0.8 || pf.MaxTokens != 200 || pf.SkipToken != "[SKIP]" {
 		t.Errorf("人格默认回落错误: %+v", pf)
 	}
+	if len(cfg.groupList) != 0 || len(cfg.privateList) != 0 {
+		t.Errorf("名单默认应为空: group=%v private=%v", cfg.groupList, cfg.privateList)
+	}
 	if cfg.randomTimezone == nil {
 		t.Error("randomTimezone 未解析")
+	}
+}
+
+func TestLoadConfigAPIKeyOptional(t *testing.T) {
+	cfg, err := loadConfig(bot.NewConfig(map[string]any{
+		"personas":  map[string]any{"default": "普通群友"},
+		"llm_model": "m",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.llmAPIKey != "" {
+		t.Fatalf("llmAPIKey = %q, want empty", cfg.llmAPIKey)
 	}
 }
 
@@ -79,8 +97,6 @@ func TestLoadConfigErrors(t *testing.T) {
 		mutate func(map[string]any)
 		want   string
 	}{
-		{"llm_api_key 缺失", func(c map[string]any) { c["llm_api_key"] = "" },
-			"agent: 配置错误 llm_api_key=: 不能为空"},
 		{"default_persona 未定义", func(c map[string]any) { c["default_persona"] = "cat" },
 			"agent: 配置错误 default_persona=cat: 未在 personas 中定义"},
 		{"personas 为空", func(c map[string]any) { c["personas"] = map[string]any{} },
@@ -114,6 +130,10 @@ func TestLoadConfigErrors(t *testing.T) {
 		{"persona max_tokens 类型错误", func(c map[string]any) {
 			c["personas"] = map[string]any{"default": map[string]any{"prompt": "p", "max_tokens": "many"}}
 		}, "agent: 配置错误 personas.default.max_tokens=many: 必须 >= 1"},
+		{"group_policy 非法", func(c map[string]any) { c["group_policy"] = "all" },
+			"agent: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一"},
+		{"private_policy 非法", func(c map[string]any) { c["private_policy"] = "on" },
+			"agent: 配置错误 private_policy=on: 必须是 off|open|whitelist|blacklist 之一"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

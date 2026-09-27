@@ -17,9 +17,33 @@ func (p *Plugin) handleGroupMessage(ctx context.Context, ev *bot.Event, r bot.Re
 	if ev.Message == nil || ev.Message.Kind != bot.MessageGroup {
 		return p.skipLog("", "not_group", "")
 	}
-	key, _, _, _ := channelKey(ev)
+	return p.handleChat(ctx, ev, r)
+}
+
+// handlePrivateMessage 处理私聊消息。必须毫秒级返回，禁止网络调用或阻塞等待。
+func (p *Plugin) handlePrivateMessage(ctx context.Context, ev *bot.Event, r bot.Reply) error {
+	if ev.Sender == nil {
+		return p.skipLog("", "no_sender", "")
+	}
+	if ev.Message == nil || ev.Message.Kind != bot.MessagePrivate {
+		return p.skipLog("", "not_private", "")
+	}
+	return p.handleChat(ctx, ev, r)
+}
+
+// handleChat 是群聊与私聊共用的入站处理：过滤 → 记历史 → 判决策 → 布防。
+func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) error {
+	key, _, _, channelID := channelKey(ev)
 	if ev.Command != nil && ev.Command.Name == "agent" {
 		return p.skipLog(key, "command", ev.Sender.ID)
+	}
+	// 名单策略在建立会话状态之前判定：被拒的会话不建状态、不进历史、不触发懒加载。
+	if ev.Message.Kind == bot.MessagePrivate {
+		if !p.policyAllowsPrivate(ev.Sender.ID) {
+			return p.skipLog(key, "not_allowed", ev.Sender.ID)
+		}
+	} else if !p.policyAllowsGroup(channelID) {
+		return p.skipLog(key, "not_allowed", ev.Sender.ID)
 	}
 	text := renderText(ev.Message)
 	st := p.stateFor(ev)
@@ -50,7 +74,7 @@ func (p *Plugin) handleGroupMessage(ctx context.Context, ev *bot.Event, r bot.Re
 	last := st.lastAgentAt
 	st.mu.Unlock()
 
-	if p.isAddressed(ev, text) {
+	if ev.Message.Kind == bot.MessagePrivate || p.isAddressed(ev, text) {
 		if now.Sub(last) < p.cfg.mentionMinInterval {
 			return p.skipLog(key, "cooldown", ev.Sender.ID)
 		}
@@ -288,6 +312,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	}
 	pendingKind := st.pendingKind
 	sender := st.lastSenderID
+	chatKind := st.kind
 	st.mu.Unlock()
 
 	if p.ctx == nil {
@@ -298,7 +323,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 
 	req := completionRequest{
 		System:      p.renderSystemPrompt(personaName, st, history),
-		User:        p.renderHistoryBlock(history),
+		User:        p.renderHistoryBlock(chatKind, history),
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
 	}
@@ -334,7 +359,8 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		return
 	}
 	platform, botID, channelID := st.platform, st.botID, st.channelID
-	mention := p.cfg.replyMentionSender && st.lastAddressed
+	peer := st.peerUserID
+	mention := p.cfg.replyMentionSender && st.lastAddressed && chatKind == bot.MessageGroup
 	st.mu.Unlock()
 
 	segs := make([]bot.Segment, 0, 2)
@@ -342,8 +368,16 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		segs = append(segs, message.At(sender))
 	}
 	segs = append(segs, message.Text(reply))
-	msg := message.Group(segs...)
-	target := bot.Target{Platform: platform, BotID: botID, ChannelID: channelID, Kind: bot.MessageGroup}
+
+	var msg *bot.Message
+	var target bot.Target
+	if chatKind == bot.MessagePrivate {
+		msg = message.Private(segs...)
+		target = bot.Target{Platform: platform, BotID: botID, UserID: peer, Kind: bot.MessagePrivate}
+	} else {
+		msg = message.Group(segs...)
+		target = bot.Target{Platform: platform, BotID: botID, ChannelID: channelID, Kind: bot.MessageGroup}
+	}
 
 	res, err := p.api.Send(p.ctx, target, msg)
 	if err != nil {

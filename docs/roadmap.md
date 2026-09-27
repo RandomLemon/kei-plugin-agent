@@ -4,7 +4,7 @@
 
 ## 12.1 现状
 
-**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `agent` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `agent` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
 `docs/` 是**验收基线**：实现必须与文档一致；行为变更先改文档，再改代码。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定。
 
@@ -47,9 +47,15 @@
 - mock 适配器端到端（[`testing.md`](testing.md) §11.3）。
 - 竞态与优雅关闭测试（[`testing.md`](testing.md) §11.4）。
 
+### P6 私聊与名单策略
+
+- `bot.WithKind(bot.MessagePrivate)` 私聊规则 `agent:private`：私聊视为寻址、必回（受 `mention_min_interval`/`mention_reply_probability` 约束），不进入随机路径（[`participation.md`](participation.md) §7.2-7.3）。
+- 会话类型贯穿状态与渲染：`channelState.kind`/`peerUserID`、`{{chat_kind}}`（[`persona.md`](persona.md) §8.5）、历史块头 `[群聊记录]`/`[私聊记录]`（§8.6）、私聊发送目标 `message.Private` + `Target{UserID, Kind: MessagePrivate}`（§7.5）。
+- `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
+- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/agent policy`、`/agent list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `agent:policy`，`Start` 同步恢复。
+
 ## 12.3 已知缺口
 
-- **私聊不参与**：只注册 `bot.MessageGroup`。如需私聊，另加一条 `WithKind(bot.MessagePrivate)` 规则。
 - **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/agent status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **无多模态输入**：图片/文件等非文本段只作为历史占位符（`[图片]` 等，见 [`persona.md`](persona.md) §8.6），不解析内容。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。

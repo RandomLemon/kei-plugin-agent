@@ -30,6 +30,8 @@ type channelState struct {
 	botID         string
 	channelID     string
 	channelName   string
+	kind          bot.MessageKind // 会话类型：group 或 private
+	peerUserID    string          // 私聊对端用户 ID（kind == private 时非空）
 	history       []Turn
 	replyTimes    []time.Time
 	lastAgentAt   time.Time
@@ -169,10 +171,10 @@ func (st *channelState) reset() {
 }
 
 // info 返回渲染提示词所需的会话元信息。
-func (st *channelState) info() (platform, botID, channelName, channelID string) {
+func (st *channelState) info() (platform, botID, channelName, channelID string, kind bot.MessageKind) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.platform, st.botID, st.channelName, st.channelID
+	return st.platform, st.botID, st.channelName, st.channelID, st.kind
 }
 
 func (st *channelState) isDisabled() bool {
@@ -220,12 +222,21 @@ func (p *Plugin) stateFor(ev *bot.Event) *channelState {
 		return st
 	}
 	channelName := ""
+	peerUserID := ""
 	if ev.Channel != nil {
 		channelName = ev.Channel.Name
 	}
+	kind := ev.Message.Kind
+	if kind == bot.MessagePrivate {
+		peerUserID = ev.Sender.ID
+		if channelName == "" {
+			channelName = ev.Sender.Name // 私聊的「会话显示名」= 对端显示名
+		}
+	}
 	st = &channelState{
 		key: key, platform: platform, botID: botID, channelID: channelID,
-		channelName: channelName, histMax: p.cfg.contextMaxMessages,
+		channelName: channelName, kind: kind, peerUserID: peerUserID,
+		histMax: p.cfg.contextMaxMessages,
 	}
 	p.channels[key] = st
 	p.evictLocked()
@@ -275,8 +286,8 @@ func (p *Plugin) evictLocked() {
 }
 
 // overrideKey 返回会话覆盖的 Storage 键。
-func overrideKey(platform, botID, channelID string) string {
-	return "agent:override:" + platform + ":" + botID + ":" + channelID
+func overrideKey(sessionKey string) string {
+	return "agent:override:" + sessionKey
 }
 
 // overrideValue 是覆盖值持久化后的 JSON 形状。
@@ -295,7 +306,7 @@ func (p *Plugin) restoreState(st *channelState) {
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
 	defer cancel()
-	raw, err := p.store.Get(ctx, overrideKey(st.platform, st.botID, st.channelID))
+	raw, err := p.store.Get(ctx, overrideKey(st.key))
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -322,7 +333,7 @@ func (p *Plugin) saveOverride(st *channelState) {
 	}
 	st.mu.Lock()
 	v := overrideValue{Persona: st.persona, Disabled: st.disabled}
-	key := overrideKey(st.platform, st.botID, st.channelID)
+	key := overrideKey(st.key)
 	st.mu.Unlock()
 
 	data, err := json.Marshal(v)

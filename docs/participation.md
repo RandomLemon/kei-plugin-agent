@@ -2,37 +2,40 @@
 
 本文覆盖第 7 章：插件最核心的行为——判断「何时接话」。所有参数名与默认值以 [`configuration.md`](configuration.md) §10.1 键表为唯一权威。
 
-决策分三段：**过滤**（7.1）、**寻址与随机参与**（7.2-7.3）、**批处理窗口与生成**（7.4-7.5）。完整伪代码见 7.6，reason token 词表见 7.7。
+决策分三段：**过滤**（7.1）、**寻址与随机参与**（7.2-7.3）、**批处理窗口与生成**（7.4-7.5）。完整伪代码见 7.6，reason token 词表见 7.7，群聊/私聊名单策略见 7.8。
 
 ## 7.1 事件过滤
 
-Handler 收到群消息后，按固定顺序过滤。**所有进入 Handler 的群消息都先写入历史**（含被下述条件过滤的），唯二例外是 `/agent` 命令与其它命令消息（命令不入历史）。
+Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进入 Handler 的消息都先写入历史**（含被下述条件过滤的），例外有三：`/agent` 命令与其它命令消息（命令不入历史）、被名单策略拒绝的会话消息（在记历史前就返回，不建会话状态，见 §7.8）。
 
 | 顺序 | 条件 | 未通过时 reason |
 | --- | --- | --- |
-| 1 | 非群聊（`ev.Message == nil` 或 `Kind != bot.MessageGroup`） | `not_group` |
+| 1 | 会话类型不匹配（群 Handler：`ev.Message == nil` 或 `Kind != bot.MessageGroup`；私聊 Handler：`ev.Message == nil` 或 `Kind != bot.MessagePrivate`） | `not_group` / `not_private` |
 | 2 | 无发送者（`ev.Sender == nil`） | `no_sender` |
 | 3 | `/agent` 命令（`ev.Command != nil && ev.Command.Name == "agent"`）——**无条件**，且不进历史 | `command` |
-| — | 记历史：`ev.Command == nil` 时把本消息写入历史；命令一律不进历史 | — |
-| 4 | 会话被 `/agent off` 关闭 | `channel_off` |
-| 5 | Storage 懒加载未完成 | `loading` |
-| 6 | 机器人发送者且 `ignore_bots=true` | `bot_sender` |
-| 7 | 命令消息且 `respond_to_commands=false` | `command` |
-| 8 | 文本为空 | `empty_text` |
-| 9 | 文本短于 `trigger_min_chars`（按 rune 计） | `too_short` |
+| 4 | 名单策略拒绝（群聊按 `ev.Channel.ID`，私聊按 `ev.Sender.ID`；模式见 §7.8）——**在建立会话状态与记历史之前**返回 | `not_allowed` |
+| — | 记历史：`ev.Command == nil` 时把本消息写入历史；命令与被拒会话一律不进历史 | — |
+| 5 | 会话被 `/agent off` 关闭 | `channel_off` |
+| 6 | Storage 懒加载未完成 | `loading` |
+| 7 | 机器人发送者且 `ignore_bots=true` | `bot_sender` |
+| 8 | 命令消息且 `respond_to_commands=false` | `command` |
+| 9 | 文本为空 | `empty_text` |
+| 10 | 文本短于 `trigger_min_chars`（按 rune 计） | `too_short` |
 
 要点：
 
-- `/agent` 命令在第 3 步就被无条件丢弃，原因见 [`architecture.md`](architecture.md) 第 6 章：`OnCommand("agent", ...)` 与群消息规则会被**同时执行**。
+- `/agent` 命令在第 3 步就被无条件丢弃，原因见 [`architecture.md`](architecture.md) 第 6 章：`OnCommand("agent", ...)` 与消息规则会被**同时执行**。
+- 名单策略在第 4 步判定，早于 `stateFor`：被拒会话不建 `channelState`、不触发 Storage 懒加载、不进历史。诊断时用日志字段 `channel=<会话键>` 配合 `/agent policy` 输出区分拒绝原因。
 - 过滤顺序固定，日志 reason 取决于**第一个**未通过的条件。
-- `not_group`/`no_sender` 在第 3 步之前，因此它们是「理论上不会发生」的护栏（规则已限定 `MessageGroup`，但 Handler 仍自检）。
+- `not_group`/`not_private`/`no_sender` 在第 3 步之前，因此它们是「理论上不会发生」的护栏（规则已按 `WithKind` 限定会话类型，但 Handler 仍自检）。
 
 ## 7.2 寻址判定
 
 ```text
-addressed = mention || reply_to_self || keyword
+addressed = 私聊 || mention || reply_to_self || keyword
 ```
 
+- **私聊**：`ev.Message.Kind == bot.MessagePrivate` 一律视为寻址（私聊里对方开口就是对你说话），因此私聊**必回**（受 `mention_min_interval` 与 `mention_reply_probability` 约束，见 §7.3）。
 - **mention**：`ev.Message.Segments` 中存在 `bot.SegAt`，且满足——
   - `self_ids` 为空 → 任意 `At` 视为寻址；
   - `self_ids` 非空 → `segment.Data[bot.KeyUserID]` 命中 `self_ids` 之一。
@@ -64,6 +67,7 @@ addressed = mention || reply_to_self || keyword
 
 说明：
 
+- 私聊不进入随机路径：私聊消息恒为寻址（§7.2），只走下面的寻址路径，**不受** `random_enabled`、小时配额、静默时段、`min_participants`、`random_cooldown` 限制。
 - `random_max_per_hour = 0` 时第 5 条恒不通过，等价于**关闭随机插话**（但寻址路径仍工作）。
 - 第 6 条的「不同真人」由 `channelState.distinctHumans(now, random_activity_window)` 统计，只计 `Self == false && IsBot == false` 的 `Turn`，按 `UserID` 去重（`UserID` 为空时按下标计一条）。
 - 静默时段语义：`23:00-07:00` 表示跨零点（23:00 起、次日 07:00 止）；不可跨零点时按同日区间。
@@ -89,21 +93,38 @@ addressed = mention || reply_to_self || keyword
 
 - **信号量**：全局 `limits_max_concurrent`（默认 2），`TryAcquire` 非阻塞获取；失败记 `semaphore_full`，丢弃本轮，不排队。获取成功 `defer Release`。
 - **epoch 机制**：生成协程捕获发起时的 `epoch`。`/agent off`、`/agent persona`、`/agent reset` 会递增 `epoch`；回调或生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」。
-- **发送**：显式构造 `bot.Target{Platform, BotID, ChannelID, Kind: bot.MessageGroup}`（**不用** `TargetFromEvent`，避免群聊目标带上 `UserID`），调用 `pc.Bot.Send(ctx, target, msg)`。需要 `send_message` 权限（已在 `Metadata` 声明）。
+- **发送**：按会话类型分派，**不用** `TargetFromEvent`：
+  - 群聊：`message.Group(segs...)` + `bot.Target{Platform, BotID, ChannelID, Kind: bot.MessageGroup}`（不填 `UserID`）；
+  - 私聊：`message.Private(segs...)` + `bot.Target{Platform, BotID, UserID: 对端用户 ID, Kind: bot.MessagePrivate}`（不填 `ChannelID`）。
+  最后调用 `p.api.Send(p.ctx, target, msg)`。需要 `send_message` 权限（已在 `Metadata` 声明）。
+- **At 段仅群聊**：`reply_mention_sender=true` 且本轮触发是寻址消息时，在文本段前插入 `message.At(发送者 ID)`；私聊不插入（@ 自己无意义）。
 - **成功后**：回写历史（`Self=true` 的 `Turn`）、把 `MessageID` 记入 ID 环、更新 `lastAgentAt`、`replyTimes` 追加、`replies++`。
 - **失败**：只记 `Warn`（核心自带重试），**不重排、不重发**，reason `send_error`。
 
 ## 7.6 决策伪代码
 
 ```text
-onGroupMessage(ev):
-  # 入站：本函数必须在毫秒级返回，禁止任何网络调用或阻塞等待
+onGroupMessage(ev):                              # agent:group（WithKind=MessageGroup）
   if ev.Sender == nil:                            return log(decision="skip", reason="no_sender")
   if ev.Message == nil || ev.Message.Kind != group: return log(decision="skip", reason="not_group")
+  return handleChat(ev)
+
+onPrivateMessage(ev):                            # agent:private（WithKind=MessagePrivate）
+  if ev.Sender == nil:                            return log(decision="skip", reason="no_sender")
+  if ev.Message == nil || ev.Message.Kind != private: return log(decision="skip", reason="not_private")
+  return handleChat(ev)
+
+handleChat(ev):
+  # 入站：本函数必须在毫秒级返回，禁止任何网络调用或阻塞等待
+  key, _, _, channelID = channelKey(ev)           # 群聊 platform:botID:channelID；私聊 platform:botID:user:<senderID>
   if ev.Command != nil && ev.Command.Name == "agent":
                                                   return log(decision="skip", reason="command")   # 无条件，且不进历史
+  if ev.Message.Kind == private:
+    if !policyAllowsPrivate(ev.Sender.ID):         return log(decision="skip", reason="not_allowed")  # 早于 stateFor
+  else:
+    if !policyAllowsGroup(channelID):              return log(decision="skip", reason="not_allowed")  # 早于 stateFor
   text = renderText(ev.Message)
-  st   = stateFor(channelKey(ev))                 # 首次出现时异步触发 Storage 懒加载
+  st   = stateFor(ev)                             # 首次出现时异步触发 Storage 懒加载
   if ev.Command == nil:                           st.appendHistory(userTurn(ev, text))            # 命令一律不进历史
 
   if st.disabled:                                 return log(decision="skip", reason="channel_off")
@@ -113,7 +134,8 @@ onGroupMessage(ev):
   if text == "":                                   return log(decision="skip", reason="empty_text")
   if runeCount(text) < trigger_min_chars:          return log(decision="skip", reason="too_short")
 
-  addressed = hasMention(ev, self_ids) || isReplyToSelf(ev) || hasKeyword(text, trigger_keywords)
+  addressed = ev.Message.Kind == private ||
+              hasMention(ev, self_ids) || isReplyToSelf(ev) || hasKeyword(text, trigger_keywords)
   now = p.now()
   if addressed:
     if now - st.lastAgentAt < mention_min_interval:  return log(decision="skip", reason="cooldown")
@@ -200,9 +222,14 @@ generate(st, epoch, history):
   st.mu.Lock()
   if st.epoch != epoch: { st.mu.Unlock(); return log(decision="skip", reason="stale") }
   segs = [message.Text(reply)]
-  if reply_mention_sender && st.lastAddressed: segs = prepend(message.At(st.lastSenderID), segs)
-  msg = message.Group(segs...)
-  target = bot.Target{Platform: st.platform, BotID: st.botID, ChannelID: st.channelID, Kind: bot.MessageGroup}
+  if reply_mention_sender && st.lastAddressed && st.kind == group:
+      segs = prepend(message.At(st.lastSenderID), segs)   # At 段仅群聊
+  if st.kind == private:
+    msg    = message.Private(segs...)
+    target = bot.Target{Platform: st.platform, BotID: st.botID, UserID: st.peerUserID, Kind: bot.MessagePrivate}
+  else:
+    msg    = message.Group(segs...)
+    target = bot.Target{Platform: st.platform, BotID: st.botID, ChannelID: st.channelID, Kind: bot.MessageGroup}
   res, err = p.api.Send(p.ctx, target, msg)           # 需要 send_message 权限
   if err != nil:
     st.mu.Unlock()
@@ -233,18 +260,20 @@ generate(st, epoch, history):
 
 ## 7.7 决策日志与 reason 词表
 
-始终以 `Debug` 级别输出每条群消息的决策行：
+始终以 `Debug` 级别输出每条群消息与私聊消息的决策行：
 
 ```text
 decision=reply|skip reason=<token> channel=<key> sender=<id>
 ```
 
-**reason token 全集固定为 22 个**（实现、日志与 [`testing.md`](testing.md) §11.2 必须一致）：
+**reason token 全集固定为 24 个**（实现、日志与 [`testing.md`](testing.md) §11.2 必须一致）：
 
 | token | 语义 |
 | --- | --- |
-| `not_group` | 非群聊消息（护栏） |
+| `not_group` | 非群聊消息（群 Handler 护栏） |
+| `not_private` | 非私聊消息（私聊 Handler 护栏） |
 | `no_sender` | 无发送者（护栏） |
+| `not_allowed` | 被名单策略拒绝（`off` 或白/黑名单未放行，见 §7.8） |
 | `bot_sender` | 机器人发送者且 `ignore_bots=true` |
 | `command` | 命令消息（`/agent` 无条件丢弃；其它命令视 `respond_to_commands`） |
 | `too_short` | 文本短于 `trigger_min_chars` |
@@ -266,4 +295,52 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 | `send_error` | 发送失败 |
 | `stale` | `epoch` 变化，结果被丢弃 |
 
-`debug_prompts=true` 时额外以 `Debug` 输出渲染后的提示词（截断 2048 字符）与 LLM 原始返回。
+`debug_prompts=true` 时额外以 Debug 输出渲染后的提示词（截断 2048 字符）与 LLM 原始返回。
+
+## 7.8 会话名单策略
+
+插件级（非每会话）的放行策略：群聊与私聊**各一套**「模式 + 单列表」，在 §7.1 第 4 步判定，先于会话状态建立。
+
+**匹配字段**
+
+| 作用域 | 匹配对象 | 说明 |
+| --- | --- | --- |
+| `group` | `ev.Channel.ID` | 群聊按频道 ID 放行/拒绝，与 `group_list` 比较 |
+| `private` | `ev.Sender.ID` | 私聊按发送者 ID 放行/拒绝，与 `private_list` 比较 |
+
+**四值模式语义**
+
+| 模式 | 语义 |
+| --- | --- |
+| `off` | 该类会话全部不参与（一刀切拒绝，名单被忽略） |
+| `open` | 全部参与，不过滤（一刀切放行，名单被忽略） |
+| `whitelist` | 仅名单内的 ID 参与 |
+| `blacklist` | 名单**外**的 ID 参与 |
+
+**空名单语义**（组合起来容易误配，逐条列清）：
+
+- `off` → 全部拒绝；`open` → 全部放行（两者都与名单无关）。
+- `whitelist` + 空名单 → **全部拒绝**（还没往名单里加人）。
+- `blacklist` + 空名单 → **全部放行**（黑名单为空 = 没有要挡的人）。
+
+**配置默认**（[`configuration.md`](configuration.md) §10.1）：`group_policy=open`、`group_list=[]`、`private_policy=off`、`private_list=[]`。即升级后群聊行为不变，私聊默认关闭；要启用私聊须显式配置或运行期切换。
+
+**运行期切换（`/agent` 子命令，仅管理员，不做 LLM 调用、不进历史）**
+
+| 命令 | 行为 | 输出（逐字） |
+| --- | --- | --- |
+| `/agent policy` | 打印两侧模式与名单条数 | `agent: group=open(0) · private=off(0)` |
+| `/agent policy group <mode>` | 设置群聊模式 | `agent: group=whitelist(0)` |
+| `/agent policy private <mode>` | 设置私聊模式 | `agent: private=blacklist(1)` |
+| `/agent list` | 打印两侧名单 | `agent: group=[g1 g2] private=[]` |
+| `/agent list group` | 打印单侧名单 | `agent: group=[g1 g2]` |
+| `/agent list group add g9` | 追加 ID（已存在则幂等） | `agent: group=[g1 g2 g9]` |
+| `/agent list group del g9` | 移除 ID（不存在则幂等） | `agent: group=[g1 g2]` |
+
+- `<mode>` 必须是 `off`/`open`/`whitelist`/`blacklist` 之一，作用域必须是 `group`/`private`；参数非法或缺参回 `/agent` 用法文本（[`persona.md`](persona.md) §8.4）。
+- ID 以**单空格**分隔；空名单渲染为 `[]`。
+- 只有真正发生变更时才写穿透；重复设置同一模式、`add` 已存在、`del` 不存在都不产生 `Storage.Set`。
+
+**持久化**：键 `agent:policy`，值 JSON 形状见 [`architecture.md`](architecture.md) §4.4。`Start` 阶段同步读一次（1s 超时，失败只 `Warn` 并保留配置默认值）；写穿透异步（1s 超时，失败只 `Warn`）。逐字段覆盖：模式为空或非法不覆盖，列表为 `null`/缺键不覆盖、为 `[]` 则覆盖为空名单。
+
+**下限保护**：`allowByMode` 对未知模式字符串返回「放行」。配置层与 Storage 层都已过滤非法模式，这个分支只在坏数据绕过两层校验时兜底——宁可多说话，也不要因为一条坏数据把机器人永久静默。

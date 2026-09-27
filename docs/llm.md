@@ -5,7 +5,7 @@
 ## 9.1 协议与请求
 
 - 端点：`POST {base_url}/chat/completions`（先 `strings.TrimRight(base_url, "/")`，再拼 `/chat/completions`）。
-- 请求头：`Content-Type: application/json`、`Authorization: Bearer {llm_api_key}`，再叠加 `llm_extra_headers`（**后**叠加，因此中继服务可覆盖 `Authorization`）。
+- 请求头：`Content-Type: application/json`；`llm_api_key` 非空时附加 `Authorization: Bearer {llm_api_key}`，留空则不带该头（本地/无鉴权推理服务）。再叠加 `llm_extra_headers`（**后**叠加，因此中继服务可覆盖 `Authorization`）。
 - HTTP 客户端：注入 `PluginContext.HTTPClient`（未声明 `network` 权限时为 nil → `Setup` 直接报错 `agent: 需要 network 权限`）。纯 `net/http`，不引入任何 SDK。
 
 请求体（逐字形状）：
@@ -87,7 +87,7 @@ type openaiClient struct { // 实现 completer
 
 ## 9.6 替换服务
 
-只需改 `llm_base_url` + `llm_model`（密钥用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入）：
+只需改 `llm_base_url` + `llm_model`（密钥用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入；本地/无鉴权服务可留空 `llm_api_key`，此时不发送 `Authorization` 头）：
 
 ```yaml
 # OpenAI

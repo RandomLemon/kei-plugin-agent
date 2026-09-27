@@ -103,7 +103,9 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 		return "", false, fmt.Errorf("agent: 构造请求失败: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	for k, v := range c.headers {
 		httpReq.Header.Set(k, v)
 	}

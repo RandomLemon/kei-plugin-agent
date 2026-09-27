@@ -5,9 +5,9 @@
 ## 1. 项目定位
 
 - 项目名 `kei-plugin-agent`，模块路径 `github.com/RandomLemon/kei-plugin-agent`，根包 `agent`。
-- 目标：给 [`kei`](https://github.com/RandomLemon/kei) 提供「LLM 人格代理」插件——在群聊里按人格预设偶尔插话，像群里一个普通真人。
+- 目标：给 [`kei`](https://github.com/RandomLemon/kei) 提供「LLM 人格代理」插件——在群聊里按人格预设偶尔插话，像群里一个普通真人；私聊中只要对方开口就必回，不做随机插话。
 - 接入形态：进程内插件。`init()` 调 `bot.RegisterPlugin(&Plugin{})`，宿主空导入 `import _ "github.com/RandomLemon/kei-plugin-agent"` + 配置 `plugins.agent.enabled: true` 即启用；kei 核心零改动。
-- 非目标：不做平台协议（适配器职责）、不做私聊参与、不引入 LLM SDK、不做持久化数据库。
+- 非目标：不做平台协议（适配器职责）、不引入 LLM SDK、不做持久化数据库。
 - 现状：设计文档与 P1-P5 实现均已落地；代码与文档保持一致，行为变更先改文档再改代码，逐项状态见 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 2. 硬性规则
@@ -84,8 +84,9 @@ kei-plugin-agent/
 ├── decision.go      接话决策：过滤、寻址判定、随机参与、批处理定时器
 ├── state.go         每会话状态、历史环、计数器、Storage 读写
 ├── llm.go           OpenAI 兼容客户端（请求/响应/重试/超时）
-├── commands.go      /agent 管理命令
-├── config_test.go / decision_test.go / llm_test.go / persona_test.go
+├── commands.go      /agent 管理命令（含 policy/list 名单策略子命令）
+├── policy.go        插件级名单策略：模式判定、/agent policy|list 渲染、agent:policy 持久化
+├── config_test.go / decision_test.go / llm_test.go / persona_test.go / policy_test.go / plugin_test.go
 ├── helpers_test.go  测试桩与测试环境构造（fake BotAPI/Storage/Registrar、日志捕获）
 ├── e2e_test.go      Mock 适配器端到端测试
 ├── docs/            设计文档（本目录即实现口径）

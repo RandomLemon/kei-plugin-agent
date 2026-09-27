@@ -48,10 +48,23 @@ func TestRenderHistoryBlock(t *testing.T) {
 		{Name: "李四", Text: "我可能不行"},
 		{Name: "小傲娇", Text: "打球可以啊", Self: true},
 	}
-	got := env.p.renderHistoryBlock(history)
+	got := env.p.renderHistoryBlock(bot.MessageGroup, history)
 	want := "[群聊记录]\n张三: 今晚谁去打球\n李四: 我可能不行\n小傲娇: 打球可以啊\n\n"
 	if got != want {
 		t.Fatalf("renderHistoryBlock =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestRenderHistoryBlockPrivate(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	history := []Turn{
+		{Name: "张三", Text: "在吗"},
+		{Name: "小傲娇", Text: "在", Self: true},
+	}
+	got := env.p.renderHistoryBlock(bot.MessagePrivate, history)
+	want := "[私聊记录]\n张三: 在吗\n小傲娇: 在\n\n"
+	if got != want {
+		t.Fatalf("renderHistoryBlock(private) =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -62,7 +75,7 @@ func TestRenderHistoryBlockTrimsOldest(t *testing.T) {
 		{Name: "李四", Text: "bbbb"},
 		{Name: "我", Text: "ccc"},
 	}
-	got := env.p.renderHistoryBlock(history)
+	got := env.p.renderHistoryBlock(bot.MessageGroup, history)
 	if got != "[群聊记录]\n我: ccc\n\n" {
 		t.Fatalf("裁剪后 = %q", got)
 	}
@@ -75,11 +88,25 @@ func TestRenderSystemPrompt(t *testing.T) {
 	st.appendHistory(Turn{At: time.Now(), UserID: "u1", Name: "张三", Text: "hi"})
 	env.fixNow(time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC))
 
-	env.p.cfg.personaTemplate = "A{{persona}}|B{{persona_name}}|C{{channel_name}}|D{{channel_id}}|E{{platform}}|F{{bot_name}}|G{{now}}|H{{last_sender}}|I{{max_chars}}|J{{skip_token}}|K{{unknown}}"
+	env.p.cfg.personaTemplate = "A{{persona}}|B{{persona_name}}|C{{channel_name}}|D{{channel_id}}|E{{platform}}|F{{bot_name}}|G{{now}}|H{{last_sender}}|I{{max_chars}}|J{{skip_token}}|K{{unknown}}|L{{chat_kind}}"
 	got := env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20))
-	want := "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}"
+	want := "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}|L群聊"
 	if got != want {
 		t.Fatalf("renderSystemPrompt =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestRenderSystemPromptPrivate(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	ev := privateEvent("u1", "张三", "在吗")
+	st := env.waitLoaded(ev)
+	st.appendHistory(Turn{At: time.Now(), UserID: "u1", Name: "张三", Text: "在吗"})
+
+	env.p.cfg.personaTemplate = "A{{chat_kind}}|B{{channel_name}}|C{{channel_id}}|D{{platform}}|E{{bot_name}}|F{{last_sender}}"
+	got := env.p.renderSystemPrompt("default", st, st.snapshotHistory(20))
+	want := "A私聊|B张三|C|Dmock|Ebot1|F张三"
+	if got != want {
+		t.Fatalf("renderSystemPrompt(private) =\n%q\nwant\n%q", got, want)
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 )
 
 func agentUsage() string {
-	return "用法: /agent status | persona [name] | on | off | reset"
+	return "用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]"
 }
 
 // handleCommand 处理 /agent 管理命令。
@@ -61,6 +61,32 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 		st.reset()
 		p.saveOverride(st)
 		return r.Text("agent: 已重置").Send(ctx)
+	case "policy":
+		if len(args) == 1 {
+			return r.Text(p.policyReport()).Send(ctx)
+		}
+		if len(args) != 3 || !p.setPolicyMode(args[1], args[2]) {
+			return r.Text(agentUsage()).Send(ctx)
+		}
+		return r.Text(p.policyScopeReport(args[1])).Send(ctx)
+	case "list":
+		switch {
+		case len(args) == 1:
+			return r.Text(p.listReport()).Send(ctx)
+		case len(args) == 2 && (args[1] == scopeGroup || args[1] == scopePrivate):
+			return r.Text(p.listScopeReport(args[1])).Send(ctx)
+		case len(args) == 4 && (args[1] == scopeGroup || args[1] == scopePrivate) && args[3] != "":
+			if args[2] == "add" {
+				p.addPolicyID(args[1], args[3])
+			} else if args[2] == "del" {
+				p.delPolicyID(args[1], args[3])
+			} else {
+				return r.Text(agentUsage()).Send(ctx)
+			}
+			return r.Text(p.listScopeReport(args[1])).Send(ctx)
+		default:
+			return r.Text(agentUsage()).Send(ctx)
+		}
 	default:
 		return r.Text(agentUsage()).Send(ctx)
 	}
