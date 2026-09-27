@@ -17,7 +17,7 @@
 ```
 
 - `temperature`/`max_tokens` 取**当前人格**的覆盖值，缺失则回落全局键 `llm_temperature`/`llm_max_tokens`。
-- `system` 的 `content` 是 `persona_template` 渲染结果，包含 10 个占位符（`{{persona}}`、`{{persona_name}}`、`{{channel_name}}`、`{{channel_id}}`、`{{platform}}`、`{{bot_name}}`、`{{now}}`、`{{last_sender}}`、`{{max_chars}}`、`{{skip_token}}`），模板全文与取值见 [`persona.md`](persona.md) §8.5（本文不重复）。
+- `system` 的 `content` 是 `persona_template` 渲染结果，包含 11 个占位符（`{{persona}}`、`{{persona_name}}`、`{{chat_kind}}`、`{{channel_name}}`、`{{channel_id}}`、`{{platform}}`、`{{bot_name}}`、`{{now}}`、`{{last_sender}}`、`{{max_chars}}`、`{{skip_token}}`），模板全文与取值见 [`persona.md`](persona.md) §8.5（本文不重复）。
 - `user` 的 `content` 是历史渲染块，见 [`persona.md`](persona.md) §8.6。
 
 **注入缝（逐字）**：

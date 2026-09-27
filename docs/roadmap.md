@@ -39,7 +39,7 @@
 
 - `persona.go`：`personas` 解析、`bindings` 匹配与优先级、`persona_template` 渲染、历史渲染。
 - `/agent persona|reset` 子命令与持久化调用。
-- `persona_test.go`：模板 10 个占位符、未知占位符保留、6 种回落占位符、清洗样例、命令输出。
+- `persona_test.go`：模板 11 个占位符、未知占位符保留、6 种回落占位符、清洗样例、命令输出。
 
 ### P5 持久化与联调
 
