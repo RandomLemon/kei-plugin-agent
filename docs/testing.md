@@ -4,7 +4,7 @@
 
 ## 11.1 质量门
 
-合并前必须全绿（与 [`../AGENTS.md`](../AGENTS.md) 第 3 节一致）：
+合并前必须全绿（本仓库质量门的唯一口径；[`../AGENTS.md`](../AGENTS.md) 只指向本节）：
 
 ```bash
 gofmt -l .          # 必须无输出
@@ -172,7 +172,6 @@ PY
 
 ## 11.4 竞态与优雅关闭
 
-- `go test -race ./...` 必过。
 - **停止后不发送**：用假 `BotAPI` 计数，断言 `Stop` 之后不再有 `Send`。
 - **及时返回**：在存在待生成协程时调用 `Stop`，断言在 15s 内返回（`wg.Wait` 配合插件级 ctx cancel）。
 - **无定时器泄漏**：断言 `Stop` 停掉了全部 `time.AfterFunc` 布防的定时器（跟踪每个 `channelState.timer` 并在 `Stop` 时 `Stop()`）。

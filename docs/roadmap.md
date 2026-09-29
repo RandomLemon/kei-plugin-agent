@@ -6,9 +6,9 @@
 
 **文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `agent` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
-`docs/` 是**验收基线**：实现必须与文档一致；行为变更先改文档，再改代码。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定。
+`docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
-质量门（[`testing.md`](testing.md) §11.1）全绿：`gofmt -l .` 无输出、`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`。开发环境由 `flake.nix` + `.envrc`（direnv `use flake`）提供，在 devShell 内执行上述命令。
+质量门与开发环境见 [`testing.md`](testing.md) §11.1。
 
 ## 12.2 实现阶段
 
@@ -62,6 +62,6 @@
 
 ## 12.4 假设与兜底
 
-- 本次交付同时包含文档与代码；后续变更遵循「先改文档、再改代码」。
+- 本次交付同时包含文档与代码（变更流程见 [`README.md`](README.md) 顶部）。
 - 上游 kei 最新 tag 为 `v0.0.1`（`89ab40c`，早于 gRPC 移除）：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）；上游出现更新的可用版本号时替换引用即可，不影响设计。
 - 若 `pkg/bot` 在实现期缺少本设计所需 API（例如浮点读取），按 [`llm.md`](llm.md) §9.1 的写法改用 `Get` + 类型断言，不得引入第三方依赖。
