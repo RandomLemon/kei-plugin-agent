@@ -8,7 +8,7 @@
 - 目标：给 [`kei`](https://github.com/RandomLemon/kei) 提供「LLM 人格代理」插件——在群聊里按人格预设偶尔插话，像群里一个普通真人；私聊中只要对方开口就必回，不做随机插话。
 - 接入形态：进程内插件。`init()` 调 `bot.RegisterPlugin(&Plugin{})`，宿主空导入 `import _ "github.com/RandomLemon/kei-plugin-agent"` + 配置 `plugins.agent.enabled: true` 即启用；kei 核心零改动。
 - 非目标：不做平台协议（适配器职责）、不引入 LLM SDK、不做持久化数据库。
-- 现状：设计文档与 P1-P5 实现均已落地；代码与文档保持一致，行为变更先改文档再改代码，逐项状态见 [`docs/roadmap.md`](docs/roadmap.md)。
+- 现状：设计文档与 P1-P6 实现均已落地；代码与文档保持一致，行为变更先改文档再改代码，逐项状态见 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 2. 硬性规则
 
@@ -26,7 +26,7 @@
 - 优先标准库：`context`、`log/slog`、`net/http`、`encoding/json`、`sync`、`math/rand`、`time`、`strings`、`unicode/utf8`。
 - 零第三方运行时依赖，LLM 调用用纯 `net/http`；不引入任何 LLM SDK。
 - 唯一非标准库依赖是 `github.com/RandomLemon/kei`（提供 `pkg/bot`、`pkg/message`）。
-- 本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（kei 无 release tag，见 [`docs/architecture.md`](docs/architecture.md) 第 6 节）。
+- 本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（上游最新 tag `v0.0.1` 指向 `89ab40c`，早于 gRPC 移除；本仓库契约版本为上游 HEAD，见 [`docs/architecture.md`](docs/architecture.md) 第 6 节）。
 - 开发环境：`flake.nix` + `.envrc`（direnv `use flake` → `nix develop`）提供 Go/gopls/gotools/golangci-lint/dlv 工具链，`GOTOOLCHAIN=local`。flake 只提供 `devShell` 与 `formatter`：构建依赖同级 kei 检出，nix 沙箱内没有该目录，故不提供 `packages`/`checks`。
 
 ### 2.3 运行时契约
@@ -107,7 +107,7 @@ kei-plugin-agent/
 | `docs/llm.md` | 9 | LLM 客户端：协议/请求/响应、超时重试与错误、长度与成本、密钥与日志安全、替换其他 OpenAI 兼容服务 |
 | `docs/configuration.md` | 10 | 全量配置键表（权威）、示例配置、环境变量覆盖、`personas`/`bindings` 结构、校验规则 |
 | `docs/testing.md` | 11 | 质量门、单元测试矩阵与注入缝、mock 适配器端到端联调、竞态与优雅关闭 |
-| `docs/roadmap.md` | 12 | 交付物现状（文档与代码均已落地）+ 实现阶段 P1-P5 |
+| `docs/roadmap.md` | 12 | 交付物现状（文档与代码均已落地）+ 实现阶段 P1-P6 |
 
 `docs/README.md` 第 2 节含与本表逐字一致的「章号↔文件对应」表。
 

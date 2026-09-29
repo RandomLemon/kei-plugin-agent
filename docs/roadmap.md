@@ -63,5 +63,5 @@
 ## 12.4 假设与兜底
 
 - 本次交付同时包含文档与代码；后续变更遵循「先改文档、再改代码」。
-- kei 无 release tag：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出；若已有可用版本号，替换引用即可，不影响设计。
+- 上游 kei 最新 tag 为 `v0.0.1`（`89ab40c`，早于 gRPC 移除）：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）；上游出现更新的可用版本号时替换引用即可，不影响设计。
 - 若 `pkg/bot` 在实现期缺少本设计所需 API（例如浮点读取），按 [`llm.md`](llm.md) §9.1 的写法改用 `Get` + 类型断言，不得引入第三方依赖。

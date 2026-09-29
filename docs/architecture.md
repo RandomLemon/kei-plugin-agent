@@ -281,11 +281,11 @@ kei-plugin-agent/
 
 ## 6. 与 kei 核心的契约对应
 
-左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `1979a6747f4fca2b32577132a7cf4fa631955ba6`）。
+左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `8747420097efb26ed591523ca8ee61ea4833c4f6`；上游最新 tag `v0.0.1` 指向 `89ab40c`，早于此版本，章节号与文件路径均按该版本核对）。
 
 | 本插件的假设/用法 | kei 的事实来源 |
 | --- | --- |
-| 插件名 `agent` 在 `init()` 里经 `bot.RegisterPlugin` 注册；宿主空导入本包 + 配置 `plugins.agent.enabled: true` 即启用。另一种接入是经装配门面的 `kei.Options.Plugins` 注入 `&agent.Plugin{}`（注入实例一律启用；与 `enabled: false` 或 `grpc_addr` 冲突时启动失败）；配置启用但未注册只记 warn `enabled plugin is not registered` | `pkg/bot/registrar.go` `RegisterPlugin`/`RegisteredPlugins`；`pkg/kei/assemble.go` `selectPlugins`；`docs/plugin.md` 第 9 章 |
+| 插件名 `agent` 在 `init()` 里经 `bot.RegisterPlugin` 注册；宿主空导入本包 + 配置 `plugins.agent.enabled: true` 即启用。另一种接入是经装配门面的 `kei.Options.Plugins` 注入 `&agent.Plugin{}`（注入实例一律启用；在配置里写 `enabled: false` 时启动失败，同名时注入优先、跳过注册表实例）；配置启用但未注册只记 warn `enabled plugin is not registered` | `pkg/bot/plugin.go` `RegisterPlugin`/`RegisteredPlugins`；`pkg/kei/assemble.go` `selectPlugins`；`docs/plugin.md` 第 9 章 |
 | 插件生命周期固定 `Setup → Start → Stop`，各阶段默认 15s 超时、带 panic 隔离，任一阶段返回错误阻止启动 | `pkg/bot/plugin.go`；`internal/pluginmgr/manager.go` `defaultSetupTimeout`/`defaultStartTimeout`/`defaultStopTimeout` |
 | `Start` 阶段可安全做一次同步 `Storage` 读（阶段预算 15s，本插件 `loadPolicy` 自设 1s 超时，超时只 `Warn`） | `internal/pluginmgr/manager.go` `defaultStartTimeout` |
 | 传给 `Setup`/`Start`/`Stop` 的 ctx 都是**阶段上下文**：`run` 内 `defer cancel()`，阶段函数一返回就取消。故插件级 ctx 必须由 `context.WithoutCancel` 派生（本插件 `Start` 的做法） | `internal/pluginmgr/manager.go` `run` |
@@ -294,7 +294,7 @@ kei-plugin-agent/
 | 本插件申请 `network`/`storage`/`send_message` 三项权限 | `register.go` 的 `Metadata`；权限常量见 `pkg/bot/plugin.go` |
 | `WithKind(bot.MessageGroup)` 只比较 `ev.Message.Kind`；`ev.Message == nil` 时不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
 | `WithKind(bot.MessagePrivate)` 同样只比较 `ev.Message.Kind`，故群聊与私聊各注册一条规则（`agent:group` / `agent:private`），互不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
-| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较 | `docs/engine.md` 7.x；`docs/configuration.md` 13.1 |
+| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较 | `docs/engine.md` 7.x；`docs/configuration.md` 12.1 |
 | `OnCommand("agent", ...)` 的规则与群消息规则会被**同时执行**（同一事件命中多条规则全部执行，`Priority` 只影响顺序、不短路，错误 `errors.Join` 聚合），故 Handler 必须无条件丢弃 `Command.Name == "agent"` | `internal/router/router.go` `Dispatch` |
 | 命令前缀默认 `["/"]`；`Command{Name,Args,Raw}`，`Name` 不含前缀；带 `/` 前缀的文本会被填 `ev.Command` | `internal/engine/engine.go`；`pkg/bot/event.go` |
 | Handler 运行在事件总线分片 worker 中：同会话串行、不同会话并行（默认 4 worker × 256 队列） | `docs/engine.md` 8.2/7.5；`internal/eventbus/bus.go` |
@@ -303,9 +303,9 @@ kei-plugin-agent/
 | `bot.Target{Platform,BotID,ChannelID,Kind}` 显式构造发送目标（不用 `TargetFromEvent`，避免群聊带上 `UserID`） | `pkg/bot/adapter.go` |
 | 私聊发送用 `message.Private(segs...)` + `bot.Target{Platform,BotID,UserID,Kind: bot.MessagePrivate}`（**不填** `ChannelID`） | `pkg/message/message.go`；`pkg/bot/adapter.go` |
 | 优雅关闭：停适配器 → 排空事件总线 → 逆序 `Stop` 插件；`Stop` 之后再发送没有意义 | `docs/engine.md` 7.3 |
-| 插件配置来自 `plugins.agent` 下除 `enabled` 的其余键，经 `PluginContext.Config` 读取 | `docs/configuration.md` 13.3；`internal/engine/engine.go` → `pluginmgr.Deps.Configs` |
+| 插件配置来自 `plugins.agent` 下除 `enabled` 的其余键，经 `PluginContext.Config` 读取 | `docs/configuration.md` 12.3；`internal/engine/engine.go` → `pluginmgr.Deps.Configs` |
 | 环境变量 `KEI_PLUGINS_AGENT_<KEY>` 把**扁平键**写入 `Settings`；故本插件全部用扁平 `snake_case` 键 | `internal/config/env.go` `applyPluginEnv`/`setSetting` |
-| `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 13.2 |
+| `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 12.2 |
 | 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
 | 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
 | `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
