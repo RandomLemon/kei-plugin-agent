@@ -49,7 +49,8 @@ go test -race ./...
 | 文本为空 | 决策结果 `reason=empty_text` |
 | 文本短于 `trigger_min_chars` | 决策结果 `reason=too_short` |
 | 会话被 `/agent off` 后入站 | 决策结果 `reason=channel_off` |
-| Storage 懒加载未完成时入站 | 决策结果 `reason=loading` |
+| Storage 懒加载未完成时入站 | 决策结果 `reason=loading`，且本条被暂存：`Get` 放行后**补判一次**并回复（群聊回 `g1`、私聊回对端）；加载窗口内多条只补判最新一条 |
+| 懒加载期间暂存的消息 × 加载到的覆盖 | `disabled=true` → 补判结果 `channel_off`、不发送；`persona` 覆盖在补判生成中生效 |
 | 非寻址且 `random_enabled=false` | 决策结果 `reason=not_addressed` |
 | `random_max_per_hour=0` | 决策结果 `reason=hour_quota`（随机插话关闭） |
 | 寻址三种来源：`bot.SegAt` / `bot.SegReply` / `trigger_keywords` | 均判定为寻址（不给出 `not_addressed`） |

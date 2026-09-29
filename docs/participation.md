@@ -16,7 +16,7 @@ Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进�
 | 4 | 名单策略拒绝（群聊按 `ev.Channel.ID`，私聊按 `ev.Sender.ID`；模式见 §7.8）——**在建立会话状态与记历史之前**返回 | `not_allowed` |
 | — | 记历史：`ev.Command == nil` 时把本消息写入历史；命令与被拒会话一律不进历史 | — |
 | 5 | 会话被 `/agent off` 关闭 | `channel_off` |
-| 6 | Storage 懒加载未完成 | `loading` |
+| 6 | Storage 懒加载未完成（本条**暂存**进 `pending` 单槽，加载完成后补判一次，见 §7.6） | `loading` |
 | 7 | 机器人发送者且 `ignore_bots=true` | `bot_sender` |
 | 8 | 命令消息且 `respond_to_commands=false` | `command` |
 | 9 | 文本为空 | `empty_text` |
@@ -27,6 +27,7 @@ Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进�
 - `/agent` 命令在第 3 步就被无条件丢弃，原因见 [`architecture.md`](architecture.md) 第 6 章：`OnCommand("agent", ...)` 与消息规则会被**同时执行**。
 - 名单策略在第 4 步判定，早于 `stateFor`：被拒会话不建 `channelState`、不触发 Storage 懒加载、不进历史。诊断时用日志字段 `channel=<会话键>` 配合 `/agent policy` 输出区分拒绝原因。
 - 过滤顺序固定，日志 reason 取决于**第一个**未通过的条件。
+- 第 6 步（Storage 懒加载未完成）**不丢消息**：本条被暂存进 `channelState.pending` 单槽、按 `loading` 记日志，`Storage.Get` 返回后由 `finishLoad` 补判一次（判定依据是加载后的 `disabled`/`persona` 真值，见 [`architecture.md`](architecture.md) §4.5）。因此首次出现的会话、进程重启后、被 LRU 淘汰后的**第一条消息都会得到回复**；加载窗口内连发多条时只补判最新一条，更早的已进历史。
 - `not_group`/`not_private`/`no_sender` 在第 3 步之前，因此它们是「理论上不会发生」的护栏（规则已按 `WithKind` 限定会话类型，但 Handler 仍自检）。
 
 ## 7.2 寻址判定
@@ -127,8 +128,12 @@ handleChat(ev):
   st   = stateFor(ev)                             # 首次出现时异步触发 Storage 懒加载
   if ev.Command == nil:                           st.appendHistory(userTurn(ev, text))            # 命令一律不进历史
 
+  if !st.deferOrLoaded(ev, text):                 # 懒加载未完成：暂存本条（有界单槽），
+                                                  return log(decision="skip", reason="loading")   # 加载完成后由 finishLoad 补判
+  return decide(st, ev, text)                     # 以下为 decide()：已加载后的完整判定链
+
+decide(st, ev, text):
   if st.disabled:                                 return log(decision="skip", reason="channel_off")
-  if !st.loaded:                                  return log(decision="skip", reason="loading")
   if ev.Sender.IsBot && ignore_bots:               return log(decision="skip", reason="bot_sender")
   if ev.Command != nil && !respond_to_commands:    return log(decision="skip", reason="command")
   if text == "":                                   return log(decision="skip", reason="empty_text")
@@ -279,7 +284,7 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 | `too_short` | 文本短于 `trigger_min_chars` |
 | `empty_text` | 文本为空 |
 | `channel_off` | 会话被 `/agent off` 关闭 |
-| `loading` | Storage 懒加载未完成 |
+| `loading` | Storage 懒加载未完成（本条已暂存 `pending` 单槽，加载完成后补判） |
 | `not_addressed` | 非寻址且 `random_enabled=false` |
 | `probability` | 概率判定未通过（寻址或随机） |
 | `min_participants` | 活跃窗口内不同真人不足 |

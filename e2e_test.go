@@ -111,13 +111,12 @@ func TestE2EMockAdapterPrivate(t *testing.T) {
 		}
 	}
 
-	// 首条过短消息只为建立并加载会话状态（loading 或 too_short 都不会回复）。
-	inject(`{"kind":"private","text":"a","user_id":"u1","user_name":"张三","platform":"mock","bot_id":"bot1"}`)
-	waitStateLoaded(t, env, "mock:bot1:user:u1")
+	// 私聊首条消息必须得到回复：懒加载期间先暂存，`Storage.Get` 返回后补判一次
+	// （回归：旧实现直接把建立会话状态的那条消息判为 loading 丢弃，首条私聊永不回复）。
 	inject(`{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三","platform":"mock","bot_id":"bot1"}`)
 
 	if !env.waitSends(1, 3*time.Second) {
-		t.Fatal("私聊注入后应触发一次回复")
+		t.Fatal("私聊首条注入后应触发一次回复")
 	}
 	sent := env.fake.at(0)
 	if sent.Target.Kind != bot.MessagePrivate || sent.Target.UserID != "u1" || sent.Target.ChannelID != "" {

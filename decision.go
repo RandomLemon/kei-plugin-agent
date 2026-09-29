@@ -50,11 +50,21 @@ func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) err
 	if ev.Command == nil {
 		st.appendHistory(p.userTurn(ev, text))
 	}
+	// 懒加载未完成：暂存本条（有界单槽），加载完成后由 restoreState 补判，
+	// 保证新会话的第一条消息不被静默丢弃；加载期间到达的更新消息会覆盖单槽。
+	if !st.deferOrLoaded(ev, text) {
+		return p.skipLog(key, "loading", ev.Sender.ID)
+	}
+	return p.decide(st, key, ev, text)
+}
+
+// decide 是「会话已加载」后的完整判定链：过滤 → 寻址 → 概率 → 布防。
+//
+// 必须毫秒级返回：只做内存判定与定时器布防，禁止任何网络调用或阻塞等待。
+// 除入站 Handler 外，restoreState 补判懒加载期间暂存的消息时也走这里。
+func (p *Plugin) decide(st *channelState, key string, ev *bot.Event, text string) error {
 	if st.isDisabled() {
 		return p.skipLog(key, "channel_off", ev.Sender.ID)
-	}
-	if !st.isLoaded() {
-		return p.skipLog(key, "loading", ev.Sender.ID)
 	}
 	if ev.Sender.IsBot && p.cfg.ignoreBots {
 		return p.skipLog(key, "bot_sender", ev.Sender.ID)

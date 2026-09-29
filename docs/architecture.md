@@ -172,6 +172,7 @@ type channelState struct {
 	disabled   bool
 	persona    string // 运行时覆盖的人格名，空 = 未覆盖
 	loaded     bool   // Storage 懒加载是否完成
+	pending    *pendingInbound // 懒加载完成前暂存的待决入站消息（有界单槽）
 	lastSenderID string // 最近一条入站消息的真人发送者 ID（用于 reply_mention_sender）
 	lastAddressed bool  // 触发本轮生成的那条消息是否被判定为寻址
 	pendingKind  string // "addressed" | "random"，本次生成的触发来源（日志用）
@@ -187,7 +188,8 @@ type channelState struct {
 - `history` 环形，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
 - `replyTimes` 只保留近 1 小时（`repliesInWindow` 读取时顺带裁剪）。
 - `epoch` 是「状态代次」：`/agent off`、`/agent persona`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
-- `loaded` 表示 Storage 懒加载是否完成；未完成前只记历史、不参与（reason `loading`）。
+- `loaded` 表示 Storage 懒加载是否完成。未完成前 Handler 不阻塞等待：把本条消息**暂存进 `pending` 单槽**并记 reason `loading`，加载完成后由 `restoreState` 调 `decide` **补判一次**（见 §4.5）。
+- `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text, epoch}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；`epoch` 变化（`/agent reset`）时暂存作废。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。
 - `disabled` 表示该会话被 `/agent off` 关闭。
 - `kind` 是会话类型（`bot.MessageGroup` / `bot.MessagePrivate`），决定寻址判定（私聊视为寻址）、发送目标（`message.Group` / `message.Private`）与提示词/历史渲染的会话类型文案。
 - `peerUserID` 是私聊对端用户 ID，私聊发送目标填 `bot.Target.UserID`（`ChannelID` 留空）。
@@ -200,7 +202,7 @@ type channelState struct {
 
 ### 4.3 LRU 淘汰
 
-内存中最多跟踪 `context_max_channels`（默认 512）个会话。超限时按最近使用时间淘汰，**只淘汰非 `inflight` 且非 `awaiting`** 的状态（有在途生成或已布防定时器的会话不淘汰）。淘汰只释放内存，不影响已持久化的覆盖。
+内存中最多跟踪 `context_max_channels`（默认 512）个会话。超限时按最近使用时间淘汰，**只淘汰非 `inflight`、非 `awaiting` 且无 `pending` 的状态**（有在途生成、已布防定时器或待补判消息的会话不淘汰；淘汰带 `pending` 的状态等于丢掉那条消息）。淘汰只释放内存，不影响已持久化的覆盖。
 
 ### 4.4 Storage 键与 JSON 形状
 
@@ -214,9 +216,11 @@ type channelState struct {
 
 首次见到某会话时**异步**触发一次 `Storage.Get`（读该会话的覆盖键）：
 
-- 未加载完成前，Handler 只记历史、不做决策，reason `loading`（见 [`participation.md`](participation.md) §7.7）。
-- 加载成功：把 `persona`、`disabled` 写回状态，置 `loaded = true`。
-- 加载失败（含 `bot.ErrNotFound`）：视为无覆盖，置 `loaded = true`，只记 `Debug`/`Warn`。
+- 加载完成前，Handler 只记历史、不判决策：记 reason `loading`，同时把该条消息**暂存进 `channelState.pending` 单槽**（见 §4.1）。Handler 禁止阻塞，因此不能同步等待 `Get`。
+- 加载完成（`finishLoad`）：写回 `persona`、`disabled`，置 `loaded = true`，并在同一临界区内取走 `pending`；取到则用插件级 ctx 调 `decide` **补判一次**（此时判定依据的是加载后的真实打开/关闭状态与人格覆盖，因此不会在 `/agent off` 的会话里发言）。补判只做内存判定与定时器布防，不做网络调用。
+- 效果：新会话（首次出现、进程重启后、被 LRU 淘汰后）的**第一条消息不再被静默吞掉**；加载期间连发的消息只补判最新一条，更早的仍随本轮生成进入 LLM 上下文。
+- 加载失败（含 `bot.ErrNotFound`）：视为无覆盖，同样置 `loaded = true` 并补判，只记 `Debug`/`Warn`。
+- `p.ctx` 为 nil 或 `p.store` 为 nil 时跳过 `Get`，仍然走 `finishLoad`（补判照常生效）。
 
 插件级名单策略是**例外**：在 `Start` 阶段同步读一次（见 §3.1），不参与每会话懒加载。
 

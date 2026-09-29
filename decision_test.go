@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +192,103 @@ func TestFilterReasons(t *testing.T) {
 			t.Fatal("want inflight")
 		}
 	})
+}
+
+// TestFirstMessageDeferredUntilLoaded 回归：新会话第一条消息不得因懒加载被丢弃。
+//
+// 懒加载未完成时 Handler 不能阻塞，只能暂存；加载完成后必须补判一次，
+// 否则每次新建会话（首次出现、重启后、被 LRU 淘汰后）的第一条消息都会被静默吞掉。
+func TestFirstMessageDeferredUntilLoaded(t *testing.T) {
+	t.Run("group", func(t *testing.T) {
+		gate := make(chan struct{})
+		store := &blockingStorage{fakeStorage: newFakeStorage(), gate: gate}
+		env := newTestEnvWith(t, nil, fastConfig, store, nil)
+
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		if !env.cap.has("loading") {
+			t.Fatal("want loading")
+		}
+		if env.fake.count() != 0 {
+			t.Fatal("懒加载完成前不应发送")
+		}
+
+		close(gate)
+		if !env.waitSends(1, 3*time.Second) {
+			t.Fatal("加载完成后应补判首条并回复")
+		}
+		if sent := env.fake.at(0); sent.Target.ChannelID != "g1" || sent.Target.Kind != bot.MessageGroup {
+			t.Fatalf("发送目标错误: %+v", sent.Target)
+		}
+	})
+
+	t.Run("private", func(t *testing.T) {
+		gate := make(chan struct{})
+		store := &blockingStorage{fakeStorage: newFakeStorage(), gate: gate}
+		env := newTestEnvWith(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["private_policy"] = "open"
+		}, store, nil)
+
+		_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+		if env.fake.count() != 0 {
+			t.Fatal("懒加载完成前不应发送")
+		}
+
+		close(gate)
+		if !env.waitSends(1, 3*time.Second) {
+			t.Fatal("私聊首条应补判并回复")
+		}
+		if sent := env.fake.at(0); sent.Target.Kind != bot.MessagePrivate || sent.Target.UserID != "u1" {
+			t.Fatalf("发送目标错误: %+v", sent.Target)
+		}
+	})
+
+	t.Run("disabled_override_wins", func(t *testing.T) {
+		gate := make(chan struct{})
+		store := &blockingStorage{fakeStorage: newFakeStorage(), gate: gate}
+		seedOverride(t, store.fakeStorage, "mock:bot1:g1", overrideValue{Disabled: true})
+		env := newTestEnvWith(t, nil, fastConfig, store, nil)
+
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		close(gate)
+		if !env.waitReason("channel_off", 3*time.Second) {
+			t.Fatal("补判必须用加载到的 disabled 覆盖")
+		}
+		if env.fake.count() != 0 {
+			t.Fatal("被关闭的会话不应发送")
+		}
+	})
+
+	t.Run("persona_override_applied", func(t *testing.T) {
+		gate := make(chan struct{})
+		store := &blockingStorage{fakeStorage: newFakeStorage(), gate: gate}
+		seedOverride(t, store.fakeStorage, "mock:bot1:g1", overrideValue{Persona: "tsundere"})
+		env := newTestEnvWith(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["debug_prompts"] = true
+		}, store, nil)
+
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		close(gate)
+		if !env.waitSends(1, 3*time.Second) {
+			t.Fatal("补判应触发回复")
+		}
+		if body := env.cap.attrOf("agent llm 请求", "body"); !strings.Contains(body, "傲娇") {
+			t.Fatalf("补判生成未使用加载到的人格覆盖: %q", body)
+		}
+	})
+}
+
+// seedOverride 往存储写入一条会话覆盖。
+func seedOverride(t *testing.T, store *fakeStorage, sessionKey string, v overrideValue) {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal override: %v", err)
+	}
+	if err := store.Set(context.Background(), overrideKey(sessionKey), raw, 0); err != nil {
+		t.Fatalf("seed override: %v", err)
+	}
 }
 
 func TestAddressedAndCooldown(t *testing.T) {

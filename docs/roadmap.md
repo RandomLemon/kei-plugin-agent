@@ -43,7 +43,7 @@
 
 ### P5 持久化与联调
 
-- Storage 懒加载（异步）与写穿透（异步，1s 超时，失败 warn）。
+- Storage 懒加载（异步；未完成时把入站消息暂存进 `pending` 单槽、加载完成后补判，避免新会话第一条消息被丢弃，见 [`architecture.md`](architecture.md) §4.5）与写穿透（异步，1s 超时，失败 warn）。
 - mock 适配器端到端（[`testing.md`](testing.md) §11.3）。
 - 竞态与优雅关闭测试（[`testing.md`](testing.md) §11.4）。
 

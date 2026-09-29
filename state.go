@@ -44,6 +44,7 @@ type channelState struct {
 	disabled      bool
 	persona       string
 	loaded        bool
+	pending       *pendingInbound // 懒加载完成前暂存的待决入站消息（有界单槽）
 	lastSenderID  string
 	lastAddressed bool
 	pendingKind   string
@@ -166,6 +167,7 @@ func (st *channelState) reset() {
 	}
 	st.disabled = false
 	st.persona = ""
+	st.pending = nil
 	st.epoch++
 	st.replies, st.skips, st.llmErrors, st.dropped = 0, 0, 0, 0
 }
@@ -187,6 +189,31 @@ func (st *channelState) isLoaded() bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.loaded
+}
+
+// pendingInbound 是 Storage 懒加载完成前暂存的一条待决入站消息。
+//
+// 单槽有界：加载完成前到达的多条消息只保留最新一条——更早的已写入 history，
+// 仍会随本轮生成交给 LLM，只有真正的最新一条需要补判。
+type pendingInbound struct {
+	ev    *bot.Event
+	text  string
+	epoch uint64
+}
+
+// deferOrLoaded 原子地处理懒加载状态：未加载则把本条入站消息存入单槽并返回 false，
+// 已加载则返回 true（调用方继续走 decide）。
+//
+// 与 finishLoad 共用 st.mu，因此「暂存」与「置 loaded 并取走暂存」互斥：
+// 每条消息要么立即被判决策，要么恰好被补判一次，不会两者皆失。
+func (st *channelState) deferOrLoaded(ev *bot.Event, text string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.loaded {
+		st.pending = &pendingInbound{ev: ev, text: text, epoch: st.epoch}
+		return false
+	}
+	return true
 }
 
 // channelKey 计算会话键：platform:botID:channelID，频道缺失时回落 platform:botID:user:<senderID>。
@@ -263,7 +290,8 @@ func (p *Plugin) evictLocked() {
 	cands := make([]cand, 0, len(p.channels))
 	for k, st := range p.channels {
 		st.mu.Lock()
-		busy := st.inflight || st.awaiting
+		// 有暂存待判消息的状态视同忙：淘汰它等于丢掉这条消息。
+		busy := st.inflight || st.awaiting || st.pending != nil
 		at := st.lastMsgAt
 		if st.lastAgentAt.After(at) {
 			at = st.lastAgentAt
@@ -296,34 +324,55 @@ type overrideValue struct {
 	Disabled bool   `json:"disabled"`
 }
 
-// restoreState 异步读取会话覆盖；读不到视为无覆盖。
+// restoreState 异步读取会话覆盖；读不到视为无覆盖，完成后补判懒加载期间暂存的消息。
 func (p *Plugin) restoreState(st *channelState) {
-	if p.ctx == nil || p.store == nil {
-		st.mu.Lock()
-		st.loaded = true
-		st.mu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
-	defer cancel()
-	raw, err := p.store.Get(ctx, overrideKey(st.key))
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	switch {
-	case err == nil:
-		var v overrideValue
-		if json.Unmarshal(raw, &v) == nil {
-			st.persona = v.Persona
-			st.disabled = v.Disabled
-		} else {
-			p.log.Warn("agent: 覆盖数据解析失败", "channel", st.key)
+	var (
+		persona  string
+		disabled bool
+		restored bool
+	)
+	if p.ctx != nil && p.store != nil {
+		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
+		defer cancel()
+		raw, err := p.store.Get(ctx, overrideKey(st.key))
+		switch {
+		case err == nil:
+			var v overrideValue
+			if json.Unmarshal(raw, &v) == nil {
+				persona, disabled, restored = v.Persona, v.Disabled, true
+			} else {
+				p.log.Warn("agent: 覆盖数据解析失败", "channel", st.key)
+			}
+		case errors.Is(err, bot.ErrNotFound):
+		default:
+			p.log.Warn("agent: 读取覆盖失败", "channel", st.key, "err", err)
 		}
-	case errors.Is(err, bot.ErrNotFound):
-	default:
-		p.log.Warn("agent: 读取覆盖失败", "channel", st.key, "err", err)
+	}
+	p.finishLoad(st, persona, disabled, restored)
+}
+
+// finishLoad 写回覆盖、置 loaded，并在同一临界区内取走懒加载期间暂存的入站消息补判。
+//
+// 「取走暂存」与 deferOrLoaded 的「暂存」互斥，因此不存在消息被丢弃的窗口；
+// 补判同样禁止网络调用，只做判定与布防（见 decide）。
+func (p *Plugin) finishLoad(st *channelState, persona string, disabled, restored bool) {
+	st.mu.Lock()
+	if restored {
+		st.persona = persona
+		st.disabled = disabled
 	}
 	st.loaded = true
+	pend := st.pending
+	st.pending = nil
+	if pend != nil && pend.epoch != st.epoch {
+		pend = nil // 期间被 /agent reset 代次作废，暂存消息随之丢弃
+	}
+	st.mu.Unlock()
+
+	if pend == nil || p.ctx == nil || p.ctx.Err() != nil {
+		return
+	}
+	_ = p.decide(st, st.key, pend.ev, pend.text)
 }
 
 // saveOverride 写穿透持久化会话覆盖（异步、带超时、失败只 warn）。
