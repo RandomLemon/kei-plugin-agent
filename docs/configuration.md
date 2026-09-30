@@ -172,9 +172,29 @@ export KEI_PLUGINS_PERSONA_RANDOM_PROBABILITY=0.3
 
 # 布尔覆盖
 export KEI_PLUGINS_PERSONA_DEBUG_PROMPTS=true
+
+# 列表键：裸标量或逗号分隔最自然（两者都被 readStringList 接受）
+export KEI_PLUGINS_PERSONA_SELF_IDS=123456789
+export KEI_PLUGINS_PERSONA_GROUP_LIST="389372103,389372104"
 ```
 
-限制：`personas`/`bindings`/`llm_extra_headers`/`group_list`/`private_list` 这类**复合结构不支持环境变量覆盖**（环境变量只能写扁平标量键），必须写在 YAML 里。模式键 `group_policy`/`private_policy` 是标量，可用环境变量覆盖（如 `KEI_PLUGINS_PERSONA_PRIVATE_POLICY=open`）。
+**覆盖范围**：`convertValue` 会把环境变量值按 YAML 规则解析（`internal/config/env.go`），因此映射与列表键**同样可以**用 env 覆盖，只是要写成 YAML/JSON 内联字面量：
+
+```bash
+export KEI_PLUGINS_PERSONA_PERSONAS='{"default": {"prompt": "普通群友"}}'
+export KEI_PLUGINS_PERSONA_BINDINGS='[{channel_id: "389372103", persona: default}]'
+export KEI_PLUGINS_PERSONA_LLM_EXTRA_HEADERS='{"X-Test": "v"}'
+```
+
+真正的限制是**可读性与 shell 引用**，不是禁止：值要走一层 shell 解析再走一层 YAML 解析，多行 prompt 只能写成 `\n` 转义，引号需要仔细配对。因此复合结构**建议**写在 YAML 里；`personas`/`bindings`/`llm_extra_headers` 这类结构在 env 里仅适合极小规模或 CI 覆盖。标量键（含 `group_policy`/`private_policy`/`self_ids` 这类扁平键）在 env 里没有摩擦，推荐用于密钥与部署差异。
+
+生效与否可在启动日志确认（`log.level: debug`）：
+
+```text
+msg=环境变量覆盖配置 env=KEI_PLUGINS_PERSONA_SELF_IDS config=plugins.persona.settings.self_ids value=123456
+```
+
+缺少该行说明未命中——最常见原因是配置里根本没有 `plugins.persona` 这个键（见上条规则）。
 
 ## 10.4 校验规则
 
