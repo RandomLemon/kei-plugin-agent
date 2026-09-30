@@ -104,10 +104,11 @@ reg.OnCommand("agent", p.handleCommand,
 
 **`Stop(ctx)`**
 
-1. `p.cancel()`：取消插件级 ctx，终止全部派生工作。
-2. 停止全部 `channelState.timer`（每个 `time.Timer.Stop()`）。
-3. `p.wg.Wait()`：等待全部生成协程退出。
-4. 幂等：重复调用安全。不做 flush——持久化是写穿透的（见第 4 章）。
+1. 标记关闭（`closing`，此后不再接受新的写穿透）并 `p.writeWG.Wait()`：**先**等在途写穿透落库，**再**取消插件级 ctx。写穿透的 ctx 派生自 `p.ctx`，顺序反了会让持久化后端（sqlite/mysql）上的最后一次覆盖/策略写入被当场取消丢弃（见 §4.6）。
+2. `p.cancel()`：取消插件级 ctx，终止全部派生工作。
+3. 停止全部 `channelState.timer`（每个 `time.Timer.Stop()`）。
+4. `p.wg.Wait()`：等待全部生成协程退出。
+5. 幂等：重复调用安全。不需要额外 flush——每次变更都已触发写穿透，第 1 步只等在途的那一次（见第 4 章）。
 
 `register.go` 的注册与元信息（逐字）：
 
@@ -132,7 +133,7 @@ func (p *Plugin) Metadata() bot.Metadata {
 | 协程 | 生命周期 | 上限 |
 | --- | --- | --- |
 | 每会话生成协程 | 定时器触发时 `wg.Add(1)` 启动，`generate` 返回时 `Done` | 每会话至多 1 个（`inflight` 保证）；全局至多 `limits_max_concurrent` 个真正调用 LLM 的协程 |
-| 写穿透持久化协程 | 每次状态变更时启动，写完后退出 | 每变更一个，数量由变更频率决定；单次 `Set` 带 1s 超时 |
+| 写穿透持久化协程 | 每次状态变更时启动，写完后退出 | 每变更一个，数量由变更频率决定；单次 `Set` 带 1s 超时；由 `writeWG` 跟踪，`Stop` 在取消插件级 ctx 之前等它们结束 |
 
 全局信号量 `limits_max_concurrent`（默认 2）用**非阻塞获取**（`TryAcquire`）；获取失败记 `semaphore_full` 并放弃本轮，不排队。
 
@@ -144,6 +145,7 @@ func (p *Plugin) Metadata() bot.Metadata {
 | `channelState` 内部字段 | `channelState.mu sync.Mutex` | 每个会话独立锁，避免全局锁竞争 |
 | 全局计数器（`/agent status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
 | 最近发送消息 ID 环（reply 寻址用） | `sync.Mutex` | 容量常量 128 的环形缓冲 |
+| 写穿透关闭标记 `closing`（配 `writeWG`） | `sync.Mutex` + `sync.WaitGroup` | 写穿透与 `Stop` 用它串行化「是否已进入关闭」，保证在途写入不被取消（见 §3.1/§4.6） |
 
 ## 4. 状态与持久化
 
@@ -210,7 +212,7 @@ type channelState struct {
 - 会话覆盖值（JSON）：`{"persona":"...","disabled":false}`。`persona` 为空表示无覆盖，`disabled` 为 `true` 表示该会话被关闭。
 - 插件级名单策略键：`agent:policy`。
 - 名单策略值（JSON）：`{"group_mode":"open","group_list":[],"private_mode":"off","private_list":[]}`。语义见 [`participation.md`](participation.md) §7.8；列表为 `null`/缺键表示无覆盖（保留配置默认值），为 `[]` 表示显式清空。
-- 无 TTL：覆盖、开关与名单策略长期保留。
+- 无 TTL：覆盖、开关与名单策略的 `Set` 一律传 `ttl = 0`（永不过期）；能否跨进程重启保留取决于宿主存储后端（见 §4.7）。
 
 ### 4.5 懒加载异步化
 
@@ -230,10 +232,11 @@ type channelState struct {
 
 - 写操作带 1s 超时（派生自插件级 ctx）。
 - 失败只记 `Warn`，不重试、不回滚（内存仍为准）。
+- `Stop` 会先置 `closing`（拒绝新写入）并 `writeWG.Wait()`，**然后**才取消插件级 ctx；因此「写入后立即关闭」在持久化后端上不会丢数据（内存后端观察不到这个差别）。每次写入自带 1s 超时，故这次等待有界。
 
 ### 4.7 重启语义
 
-进程重启后：历史与计数器丢失（内存态）；覆盖、开关与名单策略保留（已持久化）。
+进程重启后：历史与计数器丢失（内存态，不落 Storage）；覆盖、开关与名单策略的存续取决于宿主的 `bot.Storage` 后端——`storage.type: memory`（默认）随进程消失，`sqlite`/`mysql` 等持久后端保留（见 §6 与 kei 仓库 `docs/plugin.md` §11.2）。
 
 ## 5. 目录与文件职责
 
@@ -258,7 +261,7 @@ kei-plugin-agent/
 ├── llm_test.go      LLM 客户端单测（httptest.Server）
 ├── persona_test.go  人格解析、模板渲染、历史渲染、清洗单测
 ├── policy_test.go   名单策略单测（模式矩阵/命令输出/持久化/启动恢复）
-├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍然可用）
+├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍可用、Stop 等待在途写穿透）
 ├── helpers_test.go  测试桩与测试环境构造
 ├── e2e_test.go      Mock 适配器端到端测试
 ├── docs/            设计文档（本目录即实现口径）
@@ -281,7 +284,7 @@ kei-plugin-agent/
 
 ## 6. 与 kei 核心的契约对应
 
-左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `8747420097efb26ed591523ca8ee61ea4833c4f6`；上游最新 tag `v0.0.1` 指向 `89ab40c`，早于此版本，章节号与文件路径均按该版本核对）。
+左列是本插件的假设/用法，右列是 kei 的事实来源（版本 `f03daef5bb52bec9eb6198126cc01e67324f1616`，即上游 HEAD；本仓库本地开发经 `go.mod` 的 `replace` 指向同级检出，见 [`../AGENTS.md`](../AGENTS.md) §2.2）。上游最新 tag `v0.0.2` 指向 `8747420`，早于 HEAD 三个提交；本表除 storage 两行外在该 tag 上同样成立。章节号与文件路径均按 HEAD 核对。
 
 | 本插件的假设/用法 | kei 的事实来源 |
 | --- | --- |
@@ -294,10 +297,10 @@ kei-plugin-agent/
 | 本插件申请 `network`/`storage`/`send_message` 三项权限 | `register.go` 的 `Metadata`；权限常量见 `pkg/bot/plugin.go` |
 | `WithKind(bot.MessageGroup)` 只比较 `ev.Message.Kind`；`ev.Message == nil` 时不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
 | `WithKind(bot.MessagePrivate)` 同样只比较 `ev.Message.Kind`，故群聊与私聊各注册一条规则（`agent:group` / `agent:private`），互不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
-| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较 | `docs/engine.md` 7.x；`docs/configuration.md` 12.1 |
+| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较 | `docs/plugin.md` §9.2（`WithAdmin` 选项）；`docs/engine.md` §10.5（`isAdmin` 判定）；`docs/configuration.md` §12.1 |
 | `OnCommand("agent", ...)` 的规则与群消息规则会被**同时执行**（同一事件命中多条规则全部执行，`Priority` 只影响顺序、不短路，错误 `errors.Join` 聚合），故 Handler 必须无条件丢弃 `Command.Name == "agent"` | `internal/router/router.go` `Dispatch` |
 | 命令前缀默认 `["/"]`；`Command{Name,Args,Raw}`，`Name` 不含前缀；带 `/` 前缀的文本会被填 `ev.Command` | `internal/engine/engine.go`；`pkg/bot/event.go` |
-| Handler 运行在事件总线分片 worker 中：同会话串行、不同会话并行（默认 4 worker × 256 队列） | `docs/engine.md` 8.2/7.5；`internal/eventbus/bus.go` |
+| Handler 运行在事件总线分片 worker 中：同会话串行、不同会话并行（默认 4 worker × 256 队列） | `docs/engine.md` §7.5/§8.4；`internal/eventbus/bus.go` |
 | `RuleTimeout` 默认 10s、`EventTimeout` 默认 30s；故 Handler 必须非阻塞 | `internal/engine/engine.go` |
 | 发送走核心链路：能力降级、每 bot 令牌桶限流（`limits.send_rate`）、退避重试（`SendRetries` 默认 2），插件不重复实现 | `docs/engine.md` 7.7 |
 | `bot.Target{Platform,BotID,ChannelID,Kind}` 显式构造发送目标（不用 `TargetFromEvent`，避免群聊带上 `UserID`） | `pkg/bot/adapter.go` |
@@ -309,4 +312,6 @@ kei-plugin-agent/
 | 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
 | 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
 | `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
+| `bot.Storage` 的后端由宿主选择：配置 `storage.type`（`memory` 默认 / `sqlite` / `mysql`）或 `kei.Options.Storage` 注入（非 nil 优先、由调用方拥有、`Run` 不关闭）；插件只见接口，各后端读写语义一致 | `pkg/kei/assemble.go` `buildStorage`；`pkg/kei/kei.go` `Options.Storage`；`internal/storage`；`docs/plugin.md` §11.2；`docs/configuration.md` §12.5 |
+| `Storage.Set` 的 `ttl <= 0` 表示永不过期（本插件一律传 `0`）；内存后端重启即丢、持久后端保留（见 §4.7） | `pkg/bot/api.go`；`docs/plugin.md` §11.2 |
 | 核心仅暴露自身指标（Prometheus 文本），插件的观测面是 `/agent status` 与结构化日志 | `internal/metrics`；本设计 §8.4 |

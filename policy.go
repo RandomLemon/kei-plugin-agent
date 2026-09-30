@@ -148,8 +148,10 @@ func (p *Plugin) loadPolicy(ctx context.Context) {
 }
 
 // savePolicy 写穿透持久化名单策略（异步、带超时、失败只 warn）。
+//
+// 写入经 persist：Stop 会等它落库，且写入后立即关闭不丢数据。
 func (p *Plugin) savePolicy() {
-	if p.ctx == nil || p.store == nil {
+	if p.store == nil {
 		return
 	}
 	p.policyMu.RLock()
@@ -160,15 +162,9 @@ func (p *Plugin) savePolicy() {
 	if err != nil {
 		return
 	}
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
-		defer cancel()
-		if err := p.store.Set(ctx, policyKey, data, 0); err != nil {
-			p.log.Warn("agent: 写入名单策略失败", "err", err)
-		}
-	}()
+	p.persist("agent: 写入名单策略失败", func(ctx context.Context) error {
+		return p.store.Set(ctx, policyKey, data, 0)
+	})
 }
 
 // setPolicyMode 设置 scope（"group"/"private"）的模式并写穿透；scope 或 mode 非法时返回 false 且不修改。

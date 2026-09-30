@@ -78,6 +78,7 @@ go test -race ./...
 | 历史块头按会话类型 | 群聊 `[群聊记录]`、私聊 `[私聊记录]` |
 | 历史裁剪 | 超 `context_max_messages` 或 `llm_history_max_chars`（rune）从最旧丢弃，保留最新一条 |
 | 清洗管线 8 步（见 [`persona.md`](persona.md) §8.7） | 每条输入→输出样例一致 |
+| 在途写穿透未完成时调用 `Stop`（`Set` 阻塞到 gate 关闭） | `Stop` 先拒绝新写入并等其落库、再取消插件级 ctx：写入不被取消，`Stop` 在其结束后才返回（持久化后端不丢最后一次覆盖/策略） |
 | `/agent status` | 输出固定字段顺序一行 |
 | `/agent persona` | 输出 `agent: persona=<name> 来源=<override\|binding\|default>` |
 | `/agent on`、`/agent off` | 切换开关，触发 `Storage.Set`，关闭时递增 `st.epoch` |
@@ -129,6 +130,8 @@ func main() {
 
 为稳定复现，配置 `random_probability: 1.0`、`mention_min_interval: 0s`、`random_cooldown: 0s`。
 
+「重启后仍保留」这类断言需要持久化后端：kei 的默认 `storage.type: memory` 随进程消失，把宿主的 `storage: {type: sqlite, dsn: <文件路径>}`（或 `mysql`）配上才成立（见 [`architecture.md`](architecture.md) §4.7 与 kei `docs/configuration.md` §12.5）。sqlite 驱动经 cgo 编译，宿主构建需 `CGO_ENABLED=1` 与可用的 C 编译器（kei 的 devShell 已含 `gcc`）。想在同一进程里重复 `kei.Run` 模拟重启时，用 `kei.Options.Plugins: []bot.Plugin{&agent.Plugin{}}` 注入干净实例（与配置里的 `plugins.agent` 同名时注入优先，见 [`architecture.md`](architecture.md) 第 6 章）。
+
 LLM 侧用**本地桩服务**（`python3 -m http.server` 不够，它不会返回 JSON）。20 行以内的桩要点：
 
 ```bash
@@ -166,7 +169,7 @@ PY
 5. 注入 `/agent status`（核心 `auth.admin_users: ["u1"]`）→ 期望输出含 `persona=` 与计数器。
 6. 注入 `/agent off` 后再注入消息 → 期望 `/sent` 不再增长。
 7. 私聊（配置 `private_policy: open`）：注入 `{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三"}` → 期望 `/sent` 增长，且 `Target.Kind=private`、`Target.UserID=u1`、`Target.ChannelID` 为空（`curl -sS 127.0.0.1:18080/sent | jq '.[-1].Request.Target'`）。
-8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/agent policy`、`/agent list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；重启宿主后 `/agent policy` 应显示 `agent:policy` 覆盖值而非配置默认值。
+8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/agent policy`、`/agent list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；配了持久化存储后端（见上）时，重启宿主后 `/agent policy` 应显示 `agent:policy` 覆盖值而非配置默认值——默认 memory 后端重启即丢，此时该断言不成立。
 
 说明：mock 适配器的 HTTP `/inject` 支持 `kind`（缺省 `group`，可传 `private`；`private` 时不构造 `Channel`）与任意文本，但**无法构造 `bot.SegAt`**。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径覆盖随机插话、命令与私聊（`e2e_test.go` 的 `TestE2EMockAdapterPrivate`）。`/sent` 的每条记录含完整 `Request.Target`，可断言 `Kind`/`ChannelID`/`UserID`（私聊发送 `ChannelID` 为空）。
 

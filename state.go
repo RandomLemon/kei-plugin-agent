@@ -376,8 +376,10 @@ func (p *Plugin) finishLoad(st *channelState, persona string, disabled, restored
 }
 
 // saveOverride 写穿透持久化会话覆盖（异步、带超时、失败只 warn）。
+//
+// 写入经 persist：Stop 会等它落库，且写入后立即关闭不丢数据。
 func (p *Plugin) saveOverride(st *channelState) {
-	if p.ctx == nil || p.store == nil {
+	if p.store == nil {
 		return
 	}
 	st.mu.Lock()
@@ -389,15 +391,9 @@ func (p *Plugin) saveOverride(st *channelState) {
 	if err != nil {
 		return
 	}
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
-		defer cancel()
-		if err := p.store.Set(ctx, key, data, 0); err != nil {
-			p.log.Warn("agent: 写入覆盖失败", "channel", key, "err", err)
-		}
-	}()
+	p.persist("agent: 写入覆盖失败", func(ctx context.Context) error {
+		return p.store.Set(ctx, key, data, 0)
+	}, "channel", key)
 }
 
 // semaphore 是非阻塞的计数信号量。

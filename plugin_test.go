@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,4 +67,87 @@ func TestStageCtxCancelDoesNotKillRuntime(t *testing.T) {
 	if got := plainText(api.at(0).Msg); got != "打球可以啊" {
 		t.Fatalf("text = %q", got)
 	}
+}
+
+// TestStopWaitsForPendingWrite 回归：Stop 必须先等在途写穿透落库，再取消插件级 ctx。
+//
+// 写穿透的 ctx 派生自 p.ctx；持久化后端（sqlite/mysql）下若先 cancel，最后一次
+// 覆盖或策略变更会被取消丢弃，而内存后端上观察不到这个丢失。
+func TestStopWaitsForPendingWrite(t *testing.T) {
+	store := &gatedSetStorage{
+		fakeStorage: newFakeStorage(),
+		started:     make(chan struct{}),
+		gate:        make(chan struct{}),
+	}
+	p := &Plugin{}
+	pc := bot.PluginContext{
+		Name:       "agent",
+		Config:     bot.NewConfig(baseConfigMap("http://127.0.0.1:1/v1")),
+		Logger:     slog.New(&logCapture{}),
+		Storage:    store,
+		HTTPClient: &http.Client{Timeout: time.Second},
+		Bot:        &fakeBotAPI{},
+	}
+	ctx := bot.WithPluginContext(context.Background(), pc)
+	if err := p.Setup(ctx, &fakeRegistrar{}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// 触发一次写穿透：把群聊名单模式从配置默认的 open 改成 whitelist。
+	if !p.setPolicyMode(scopeGroup, "whitelist") {
+		t.Fatal("setPolicyMode 未生效")
+	}
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("写穿透未开始")
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.Stop(context.Background()) }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop 在在途写穿透结束前返回")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(store.gate)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("写穿透结束后 Stop 未返回")
+	}
+
+	if store.err != nil {
+		t.Fatalf("在途写入被 Stop 取消: %v", store.err)
+	}
+	raw, ok := store.value(policyKey)
+	if !ok || !strings.Contains(raw, "whitelist") {
+		t.Fatalf("策略未落库: %q ok=%v", raw, ok)
+	}
+}
+
+// gatedSetStorage 的 Set 会阻塞到 gate 关闭（或 ctx 取消，此时记录 err）。
+type gatedSetStorage struct {
+	*fakeStorage
+	started chan struct{}
+	gate    chan struct{}
+	err     error
+}
+
+func (s *gatedSetStorage) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	close(s.started)
+	select {
+	case <-s.gate:
+	case <-ctx.Done():
+		s.err = ctx.Err()
+		return s.err
+	}
+	return s.fakeStorage.Set(ctx, key, value, ttl)
 }

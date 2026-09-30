@@ -63,5 +63,5 @@
 ## 12.4 假设与兜底
 
 - 本次交付同时包含文档与代码（变更流程见 [`README.md`](README.md) 顶部）。
-- 上游 kei 最新 tag 为 `v0.0.1`（`89ab40c`，早于 gRPC 移除）：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）；上游出现更新的可用版本号时替换引用即可，不影响设计。
+- 上游 kei 最新 tag 为 `v0.0.2`（`8747420`，早于当前 HEAD `f03daef` 三个提交：pluggable storage 与 `/manage` 命令命名空间）：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）；上游出现更新的可用版本号时替换引用即可，不影响设计。
 - 若 `pkg/bot` 在实现期缺少本设计所需 API（例如浮点读取），按 [`llm.md`](llm.md) §9.1 的写法改用 `Get` + 类型断言，不得引入第三方依赖。

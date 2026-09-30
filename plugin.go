@@ -35,6 +35,14 @@ type Plugin struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// writeMu 保护 closing；写穿透与 Stop 用它串行化「是否已进入关闭」的判定。
+	writeMu sync.Mutex
+	// closing 为真表示 Stop 已开始，此后不再接受新的写穿透。
+	closing bool
+	// writeWG 跟踪在途的写穿透协程：Stop 先等它们结束再取消 p.ctx，
+	// 否则派生自 p.ctx 的写入会被当场取消（持久化后端上会丢数据）。
+	writeWG sync.WaitGroup
+
 	mu       sync.RWMutex
 	channels map[string]*channelState
 
@@ -118,8 +126,44 @@ func (p *Plugin) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop 取消插件级 ctx、停止全部定时器并等待后台协程退出；幂等。
+// persist 异步执行一次写穿透：带 storageTimeout 超时，失败只 warn。
+//
+// Stop 之后拒绝新写入；在途写入由 writeWG 跟踪，Stop 会先等它们结束再取消
+// p.ctx——顺序反了的话，派生自 p.ctx 的写入 ctx 会被当场取消，持久化后端
+// （sqlite/mysql）上最后一次覆盖或策略变更就丢了。
+func (p *Plugin) persist(op string, fn func(ctx context.Context) error, attrs ...any) {
+	if p.ctx == nil || p.store == nil {
+		return
+	}
+	p.writeMu.Lock()
+	if p.closing {
+		p.writeMu.Unlock()
+		return
+	}
+	p.writeWG.Add(1)
+	p.writeMu.Unlock()
+
+	go func() {
+		defer p.writeWG.Done()
+		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
+		defer cancel()
+		if err := fn(ctx); err != nil {
+			p.log.Warn(op, append(attrs, "err", err)...)
+		}
+	}()
+}
+
+// Stop 标记关闭、等待在途写穿透结束，再取消插件级 ctx、停止全部定时器并
+// 等待后台协程退出；幂等。
 func (p *Plugin) Stop(ctx context.Context) error {
+	// 先拒绝新写入并等在途写入落库，再取消 p.ctx：写穿透的 ctx 派生自 p.ctx，
+	// 先取消会让持久化后端上的最后一次写入被丢弃（见 persist）。每次写入自带
+	// storageTimeout，故这里的等待有界。
+	p.writeMu.Lock()
+	p.closing = true
+	p.writeMu.Unlock()
+	p.writeWG.Wait()
+
 	if p.cancel != nil {
 		p.cancel()
 	}

@@ -16,7 +16,7 @@
 | 接话决策 | 过滤 → 寻址判定 → 随机参与 → 批处理窗口合并成一轮生成（[§7](docs/participation.md)） |
 | 名单策略 | 群聊与私聊各一套模式 + 单列表（[§7.8](docs/participation.md)） |
 | 管理命令 | `/agent` 系列，仅管理员，不调用 LLM、不进历史（[§8.4](docs/persona.md)） |
-| 持久化 | 每会话的人格覆盖与开关、插件级名单策略写入 `bot.Storage`；进程重启丢历史与计数器、保留覆盖与策略 |
+| 持久化 | 每会话的人格覆盖与开关、插件级名单策略写入 `bot.Storage`；历史与计数器只在内存，覆盖与策略的存续取决于宿主存储后端（默认 memory 重启即丢，`storage.type: sqlite`/`mysql` 保留） |
 | 可观测 | 每条消息以 `Debug` 输出决策行（reason 词表见 [§7.7](docs/participation.md)），`/agent status` 汇总计数 |
 
 设计口径、边界与非目标见 [`docs/`](docs/README.md)；硬性规则见 [`AGENTS.md`](AGENTS.md)。
