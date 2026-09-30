@@ -38,12 +38,15 @@ addressed = 私聊 || mention || reply_to_self || keyword
 
 - **私聊**：`ev.Message.Kind == bot.MessagePrivate` 一律视为寻址（私聊里对方开口就是对你说话），因此私聊**必回**（受 `mention_min_interval` 与 `mention_reply_probability` 约束，见 §7.3）。
 - **mention**：`ev.Message.Segments` 中存在 `bot.SegAt`，且满足——
-  - `self_ids` 为空 → 任意 `At` 视为寻址；
+  - `self_ids` 为空 → 任意指向具体用户的 `At` 视为寻址（`@全体成员` 除外，见下）；
   - `self_ids` 非空 → `segment.Data[bot.KeyUserID]` 命中 `self_ids` 之一。
+  - `@全体成员` 在 OneBot 下上报为 `qq="all"`（契约见 [`architecture.md`](architecture.md) 第 6 章），**任何情况下都不算寻址**：@全体不等于 @机器人。
 - **reply_to_self**：存在 `bot.SegReply`，其 `segment.Data[bot.KeyMessageID]` 命中「最近发送消息 ID 环」。该环容量常量 `128`，每次 `BotAPI.Send` 成功把 `SendResult.MessageID` 入环。
 - **keyword**：文本对 `trigger_keywords` 做**大小写不敏感子串匹配**（`strings.Contains(strings.ToLower(text), strings.ToLower(kw))`）。`trigger_keywords` 为空表示关闭。
 
 寻址判定只需要文本与消息段，不需要网络，因此可在 Handler 内完成。
+
+**列表键的取值口径**：`self_ids`、`trigger_keywords`、`group_list`、`private_list` 四个列表键经 `readStringList` 读取，兼容 `["123"]`、`[123]`（YAML 裸数字）、`123`（裸标量）、`"123,456"`（逗号分隔）四种写法，元素一律按 YAML 语义转成字符串后比对，不做类型断言丢弃。原因见 [`configuration.md`](configuration.md) §10.4。
 
 ## 7.3 随机参与
 

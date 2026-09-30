@@ -143,6 +143,12 @@ func (p *Plugin) isAddressed(ev *bot.Event, text string) bool {
 		hasKeyword(text, p.cfg.triggerKeywords)
 }
 
+// atAllSentinel 是 OneBot 等平台表示「@全体成员」的 At 目标值。
+//
+// 它不是一个真实用户 ID，任何情况下都不应算作「@机器人」；否则 @全体 会触发
+// 回复，且与 self_ids 是否配置无关（见 participation.md §7.2）。
+const atAllSentinel = "all"
+
 func hasMention(msg *bot.Message, selfIDs []string) bool {
 	if msg == nil {
 		return false
@@ -151,10 +157,13 @@ func hasMention(msg *bot.Message, selfIDs []string) bool {
 		if seg.Type != bot.SegAt {
 			continue
 		}
+		id := strOf(seg.Data[bot.KeyUserID])
+		if id == atAllSentinel {
+			continue
+		}
 		if len(selfIDs) == 0 {
 			return true
 		}
-		id := strOf(seg.Data[bot.KeyUserID])
 		for _, s := range selfIDs {
 			if s == id {
 				return true

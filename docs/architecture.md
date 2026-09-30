@@ -311,6 +311,8 @@ kei-plugin-persona/
 | `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 12.2 |
 | 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
 | 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
+| `Config.Strings` 的 `[]any` 分支只保留 `string` 元素，**裸数字被静默丢弃**；故 `[]string` 键（`self_ids`/`trigger_keywords`/`group_list`/`private_list`）一律经本插件的 `readStringList` 读取 | `pkg/bot/api.go`；[`configuration.md`](configuration.md) §10.4 注 |
+| OneBot 把 `@全体成员` 上报为 `at` 段 `Data[bot.KeyUserID] == "all"`（非真实用户 ID）；`at` 段标准键为 `qq`、部分实现用 `user_id`，两者适配器都归一为 `KeyUserID` | `kei/adapters/onebot/message.go` `convertSegment` |
 | `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
 | `bot.Storage` 的后端由宿主选择：配置 `storage.type`（`memory` 默认 / `sqlite` / `mysql`）或 `kei.Options.Storage` 注入（非 nil 优先、由调用方拥有、`Run` 不关闭）；插件只见接口，各后端读写语义一致 | `pkg/kei/assemble.go` `buildStorage`；`pkg/kei/kei.go` `Options.Storage`；`internal/storage`；`docs/plugin.md` §11.2；`docs/configuration.md` §12.5 |
 | `Storage.Set` 的 `ttl <= 0` 表示永不过期（本插件一律传 `0`）；内存后端重启即丢、持久后端保留（见 §4.7） | `pkg/bot/api.go`；`docs/plugin.md` §11.2 |

@@ -12,7 +12,7 @@
 | `default_persona` | string | `default` | 默认人格名，必须存在于 `personas` |
 | `persona_template` | string | 内建模板（[`persona.md`](persona.md) §8.5） | 系统提示词模板 |
 | `bindings` | list | `[]` | 每会话人格绑定：`{platform,bot_id,channel_id,persona}`，`channel_id` 必填 |
-| `self_ids` | []string | `[]` | 视为「被 @」的本机器人用户 ID；空表示任意 At 均算寻址 |
+| `self_ids` | []string | `[]` | 视为「被 @」的本机器人用户 ID；空表示任意 At 均算寻址（`@全体成员` 除外） |
 | `trigger_keywords` | []string | `[]` | 关键词寻址，大小写不敏感子串匹配；空表示关闭 |
 | `trigger_min_chars` | int | `2` | 短于该长度的文本只记历史不参与（按 rune 计） |
 | `ignore_bots` | bool | `true` | 忽略机器人发送者 |
@@ -207,15 +207,15 @@ persona: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist �
 | `default_persona` | 必须已存在于 `personas`，否则 `未在 personas 中定义` |
 | `persona_template` | 无额外校验（空值回落内建模板） |
 | `bindings` | 每个元素的 channel_id 不能为空；元素的 persona 必须已定义 |
-| `self_ids` | 无额外校验 |
-| `trigger_keywords` | 无额外校验 |
+| `self_ids` | 无额外校验；列表元素按 YAML 语义转字符串（`[123]`、`123`、`"12,34"` 均可用，见 §10.4 注） |
+| `trigger_keywords` | 无额外校验；取值口径同 `self_ids` |
 | `trigger_min_chars` | 必须 >= 0 |
 | `ignore_bots` | 无额外校验 |
 | `respond_to_commands` | 无额外校验 |
 | `group_policy` | 必须是 `off`\|`open`\|`whitelist`\|`blacklist` 之一，否则 `必须是 off\|open\|whitelist\|blacklist 之一` |
-| `group_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8） |
+| `group_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8）；取值口径同 `self_ids` |
 | `private_policy` | 必须是 `off`\|`open`\|`whitelist`\|`blacklist` 之一，否则 `必须是 off\|open\|whitelist\|blacklist 之一` |
-| `private_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8） |
+| `private_list` | 无额外校验（空名单语义见 [`participation.md`](participation.md) §7.8）；取值口径同 `self_ids` |
 | `mention_reply_probability` | 必须是 0..1 之间的小数 |
 | `mention_min_interval` | 必须 >= 0 |
 | `random_enabled` | 无额外校验 |
@@ -245,5 +245,9 @@ persona: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist �
 | `reply_dedupe` | 无额外校验 |
 | `limits_max_concurrent` | 必须 >= 1 |
 | `debug_prompts` | 无额外校验 |
+
+**注（列表键的取值口径）**：`self_ids`、`trigger_keywords`、`group_list`、`private_list` 是四个 `[]string` 键，由 `readStringList` 读取。四者都兼容 YAML 的常见写法：`["123"]`（带引号）、`[123]`（裸数字）、`123`（裸标量）、`"123,456"`（逗号分隔）。元素一律按 YAML 语义转成字符串后使用，不做 `x.(string)` 类型断言丢弃。
+
+这与 `bot.Config.Strings` 的差异是**有意的**：`Strings` 对 `[]any` 分支只保留字符串元素，裸数字被静默丢弃。QQ 号常被写成裸数字，一旦被丢成空列表，`self_ids` 就会落入「空 = 任意 At 均算寻址」的语义（见 [`participation.md`](participation.md) §7.2），表现为 `@任何人都触发回复`。同理，`group_policy: whitelist` + `group_list: [123456]`（裸数字）会让白名单形同虚设（全员被拒）。
 
 补充：缺少 network 权限时 `PluginContext.HTTPClient == nil`，`Setup` 额外返回 `persona: 需要 network 权限`（见 [`llm.md`](llm.md) §9.1）。

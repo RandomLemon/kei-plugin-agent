@@ -149,8 +149,8 @@ func loadConfig(c *bot.Config) (*config, error) {
 		return nil, err
 	}
 
-	cfg.selfIDs = c.Strings("self_ids")
-	cfg.triggerKeywords = c.Strings("trigger_keywords")
+	cfg.selfIDs = readStringList(c, "self_ids")
+	cfg.triggerKeywords = readStringList(c, "trigger_keywords")
 	cfg.ignoreBots = r.boolean("ignore_bots", true)
 	cfg.respondToCommands = r.boolean("respond_to_commands", false)
 	cfg.mentionMinInterval = r.dur("mention_min_interval", 10*time.Second)
@@ -165,9 +165,9 @@ func loadConfig(c *bot.Config) (*config, error) {
 	cfg.debugPrompts = r.boolean("debug_prompts", false)
 
 	cfg.groupPolicy = r.str("group_policy", policyOpen)
-	cfg.groupList = c.Strings("group_list")
+	cfg.groupList = readStringList(c, "group_list")
 	cfg.privatePolicy = r.str("private_policy", policyOff)
-	cfg.privateList = c.Strings("private_list")
+	cfg.privateList = readStringList(c, "private_list")
 
 	if cfg.triggerMinChars, err = r.intKey("trigger_min_chars", 2, "必须 >= 0"); err != nil {
 		return nil, err
@@ -395,6 +395,55 @@ func readHeaders(c *bot.Config) map[string]string {
 		out[k] = strOf(v)
 	}
 	return out
+}
+
+// readStringList 读取字符串列表配置，兼容 YAML/环境变量注入的各种写法。
+//
+// 与 bot.Config.Strings 的差别：列表元素与标量都按 YAML 语义转成字符串后再取用，
+// 不做 `x.(string)` 类型断言丢弃。因为 YAML 里 `self_ids: [123456789]`
+// （QQ 号常被写成裸数字）与 `self_ids: 123456789` 都是合法写法，静默丢成空列表会
+// 让空列表语义（见 participation.md §7.2：self_ids 为空即任意 At 都算寻址）生效，
+// 导致 @ 任何人都会触发回复。
+//
+// 规则：标量 → 单元素列表；逗号分隔字符串 → 多元素；列表元素逐个 strOf 转换；
+// 所有空串一律丢弃；键缺失或无法识别时返回 nil（调用方按「未配置」处理）。
+func readStringList(c *bot.Config, key string) []string {
+	raw, ok := c.Get(key)
+	if !ok || raw == nil {
+		return nil
+	}
+	switch t := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := strings.TrimSpace(strOf(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		out := make([]string, 0, 4)
+		for _, p := range strings.Split(t, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	default:
+		// 标量（int/float64/bool 等）：按单元素列表处理。
+		if s := strings.TrimSpace(strOf(raw)); s != "" {
+			return []string{s}
+		}
+		return nil
+	}
 }
 
 // matchBinding 按「非空字段最多、并列取靠前」返回命中的人格名。

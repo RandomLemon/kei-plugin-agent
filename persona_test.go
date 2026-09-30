@@ -261,6 +261,82 @@ func TestHasMentionSelfIDs(t *testing.T) {
 	}
 }
 
+// TestHasMentionAtAll 锁定：@全体成员（qq="all"）任何情况下都不算寻址。
+func TestHasMentionAtAll(t *testing.T) {
+	msg := func(segs ...bot.Segment) *bot.Message { return &bot.Message{Segments: segs} }
+	all := bot.Segment{Type: bot.SegAt, Data: map[string]any{bot.KeyUserID: "all"}}
+
+	if hasMention(msg(all), nil) {
+		t.Error("self_ids 为空时 @全体 也不应算寻址")
+	}
+	if hasMention(msg(all), []string{"all"}) {
+		t.Error("即使 self_ids 显式写了 all 也不应算寻址（all 不是真实用户 ID）")
+	}
+	// 同一消息里 @全体 + @本人：仍应因后者判定为寻址。
+	me := bot.Segment{Type: bot.SegAt, Data: map[string]any{bot.KeyUserID: "me"}}
+	if !hasMention(msg(all, me), []string{"me"}) {
+		t.Error("@全体 与 @本人 同时出现时应判定为寻址")
+	}
+	// @全体 在前不应短路掉后续段的判定。
+	if !hasMention(msg(all, me), nil) {
+		t.Error("@全体 不应短路后续 At 段的判定")
+	}
+}
+
+// TestSelfIDsUnquotedYAML 锁定：self_ids 写成 YAML 裸数字时不会被静默丢弃。
+//
+// 回归场景：self_ids 被丢成空列表会落入「空 = 任意 At 均算寻址」，
+// 表现为 @任何人都触发 kind=addressed 回复。
+func TestSelfIDsUnquotedYAML(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  any
+	}{
+		{"quoted-list", []any{"123456789"}},
+		{"unquoted-list", []any{123456789}},
+		{"bare-scalar", 123456789},
+		{"csv-string", "123456789"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfig(bot.NewConfig(map[string]any{
+				"personas":  map[string]any{"default": map[string]any{"prompt": "p"}},
+				"llm_model": "m",
+				"self_ids":  tc.raw,
+			}))
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if len(cfg.selfIDs) != 1 || cfg.selfIDs[0] != "123456789" {
+				t.Fatalf("selfIDs = %#v, want [123456789]", cfg.selfIDs)
+			}
+		})
+	}
+}
+
+// TestListKeysUnquotedYAML 锁定名单键同样兼容裸数字写法。
+func TestListKeysUnquotedYAML(t *testing.T) {
+	cfg, err := loadConfig(bot.NewConfig(map[string]any{
+		"personas":     map[string]any{"default": map[string]any{"prompt": "p"}},
+		"llm_model":    "m",
+		"group_policy": "whitelist",
+		"group_list":   []any{389372103},
+		"private_list": "123, 456",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(cfg.groupList) != 1 || cfg.groupList[0] != "389372103" {
+		t.Fatalf("groupList = %#v, want [389372103]", cfg.groupList)
+	}
+	if len(cfg.privateList) != 2 || cfg.privateList[0] != "123" || cfg.privateList[1] != "456" {
+		t.Fatalf("privateList = %#v, want [123 456]", cfg.privateList)
+	}
+	if !allowByMode(cfg.groupPolicy, cfg.groupList, "389372103") {
+		t.Error("裸数字群号应命中白名单")
+	}
+}
+
 func TestHasKeyword(t *testing.T) {
 	if !hasKeyword("小助手在吗", []string{"小助手"}) {
 		t.Error("关键词子串匹配失败")

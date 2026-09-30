@@ -56,6 +56,8 @@ go test -race ./...
 | 寻址三种来源：`bot.SegAt` / `bot.SegReply` / `trigger_keywords` | 均判定为寻址（不给出 `not_addressed`） |
 | `self_ids` 为空 vs 非空：非空时 At 到他人 ID | 空 → 寻址；非空且未命中 → 非寻址 |
 | `self_ids` 非空且 At 命中 `Data[bot.KeyUserID]` | 判定为寻址 |
+| `At` 的 `Data[bot.KeyUserID] == "all"`（`@全体成员`） | **任何情况下都不算寻址**：`self_ids` 为空时也不触发；同一消息另含 @他人（`self_ids` 为空）或 @本人（命中 `self_ids`）时仍判为寻址 |
+| 列表键写成 YAML 裸数字（`self_ids`/`group_list`/`private_list`）或裸标量 / 逗号分隔字符串 | 元素经 `readStringList` 转字符串后生效，不落入空列表语义；`group_policy=whitelist` + `group_list: [群号]` 命中放行 |
 | `random_probability=0` | 永不命中（`reason=probability`） |
 | `random_probability=1`（其余条件满足） | 必定进入 `schedule()` |
 | `random_min_participants` 不足 | 决策结果 `reason=min_participants` |

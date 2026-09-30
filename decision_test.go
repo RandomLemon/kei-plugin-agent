@@ -347,6 +347,56 @@ func TestAddressedAndCooldown(t *testing.T) {
 			t.Fatal("want cooldown")
 		}
 	})
+	// 回归：onebot 下「引用他人 + @他人 + 文本」曾被判为寻址，逐条覆盖三种 At 来源。
+	t.Run("at_other_not_addressed", func(t *testing.T) {
+		cases := []struct {
+			name string
+			seg  bot.Segment
+		}{
+			{"at-other", bot.Segment{Type: bot.SegAt, Data: map[string]any{bot.KeyUserID: "1139954766"}}},
+			{"at-all", bot.Segment{Type: bot.SegAt, Data: map[string]any{bot.KeyUserID: "all"}}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				env := newTestEnv(t, nil, func(c map[string]any) {
+					fastConfig(c)
+					c["random_enabled"] = false
+					c["self_ids"] = []any{"99999"}
+				})
+				ev := groupEvent("389372103", "1832783120", "int16@nixos", "可能比manjaro还要臃肿不少")
+				ev.Message.Segments = []bot.Segment{
+					{Type: bot.SegReply, Data: map[string]any{bot.KeyMessageID: "1585012348"}},
+					tc.seg,
+					{Type: bot.SegText, Data: map[string]any{bot.KeyText: "可能比manjaro还要臃肿不少"}},
+				}
+				env.waitLoaded(ev)
+				_ = env.deliver(ev)
+				if !env.cap.has("not_addressed") {
+					t.Fatal("want not_addressed：非寻址消息不应进入寻址路径")
+				}
+				if env.fake.count() != 0 {
+					t.Fatalf("不应发送, count=%d", env.fake.count())
+				}
+			})
+		}
+	})
+	// 回归：self_ids 写成 YAML 裸数字时不得被丢成空列表（空 = 任意 At 均算寻址）。
+	t.Run("self_ids_unquoted_still_matches", func(t *testing.T) {
+		env := newTestEnv(t, nil, func(c map[string]any) {
+			fastConfig(c)
+			c["self_ids"] = []any{99999}
+		})
+		ev := groupEvent("g1", "u1", "张三", "在吗")
+		ev.Message.Segments = []bot.Segment{
+			{Type: bot.SegAt, Data: map[string]any{bot.KeyUserID: "99999"}},
+			{Type: bot.SegText, Data: map[string]any{bot.KeyText: "在吗"}},
+		}
+		env.waitLoaded(ev)
+		_ = env.deliver(ev)
+		if !env.waitSends(1, 2*time.Second) {
+			t.Fatal("@本人应触发回复")
+		}
+	})
 }
 
 func TestReplyMentionSender(t *testing.T) {
