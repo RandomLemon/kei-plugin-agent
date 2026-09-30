@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func (p *Plugin) handlePrivateMessage(ctx context.Context, ev *bot.Event, r bot.
 // handleChat 是群聊与私聊共用的入站处理：过滤 → 记历史 → 判决策 → 布防。
 func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) error {
 	key, _, _, channelID := channelKey(ev)
-	if ev.Command != nil && ev.Command.Name == "agent" {
+	if ev.Command != nil && ev.Command.Name == "persona" {
 		return p.skipLog(key, "command", ev.Sender.ID)
 	}
 	// 名单策略在建立会话状态之前判定：被拒的会话不建状态、不进历史、不触发懒加载。
@@ -81,7 +81,7 @@ func (p *Plugin) decide(st *channelState, key string, ev *bot.Event, text string
 
 	now := p.now()
 	st.mu.Lock()
-	last := st.lastAgentAt
+	last := st.lastReplyAt
 	st.mu.Unlock()
 
 	if ev.Message.Kind == bot.MessagePrivate || p.isAddressed(ev, text) {
@@ -260,7 +260,7 @@ func (p *Plugin) schedule(st *channelState, kind string, ev *bot.Event) error {
 	st.timer = time.AfterFunc(delay, func() { p.onBatch(st, epoch) })
 	st.mu.Unlock()
 
-	p.log.Debug("agent 决策", "decision", "reply", "kind", kind, "channel", key)
+	p.log.Debug("persona 决策", "decision", "reply", "kind", kind, "channel", key)
 	return nil
 }
 
@@ -340,7 +340,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	content, err := p.completer.Complete(p.ctx, req)
 	if err != nil {
 		p.bumpLLMError(st)
-		p.log.Warn("agent: LLM 调用失败", "channel", st.key, "err", err)
+		p.log.Warn("persona: LLM 调用失败", "channel", st.key, "err", err)
 		_ = p.skipLog(st.key, "llm_error", sender)
 		return
 	}
@@ -384,14 +384,14 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 
 	res, err := p.api.Send(p.ctx, target, msg)
 	if err != nil {
-		p.log.Warn("agent: 发送失败", "channel", st.key, "err", err)
+		p.log.Warn("persona: 发送失败", "channel", st.key, "err", err)
 		_ = p.skipLog(st.key, "send_error", sender)
 		return
 	}
 
 	now := p.now()
 	st.mu.Lock()
-	st.lastAgentAt = now
+	st.lastReplyAt = now
 	st.replyTimes = append(st.replyTimes, now)
 	st.appendHistoryLocked(Turn{At: now, Name: p.personaDisplayName(personaName), Text: reply, Self: true})
 	st.replies++
@@ -399,12 +399,12 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	if res != nil {
 		p.replyIDs.Add(res.MessageID)
 	}
-	p.log.Debug("agent 决策", "decision", "reply", "kind", pendingKind, "channel", st.key)
+	p.log.Debug("persona 决策", "decision", "reply", "kind", pendingKind, "channel", st.key)
 }
 
 // skipLog 输出决策日志的 skip 行。
 func (p *Plugin) skipLog(key, reason, sender string) error {
-	p.log.Debug("agent 决策", "decision", "skip", "reason", reason, "channel", key, "sender", sender)
+	p.log.Debug("persona 决策", "decision", "skip", "reason", reason, "channel", key, "sender", sender)
 	return nil
 }
 

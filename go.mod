@@ -1,4 +1,4 @@
-module github.com/RandomLemon/kei-plugin-agent
+module github.com/RandomLemon/kei-plugin-persona
 
 go 1.25.0
 

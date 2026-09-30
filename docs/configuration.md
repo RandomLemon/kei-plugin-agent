@@ -1,6 +1,6 @@
 # configuration.md — 配置（第 10 章）
 
-本文覆盖第 10 章：`plugins.agent` 的**全量配置键表（权威）**、示例配置、环境变量覆盖、`personas`/`bindings` 结构与校验规则。其它文档引用的键名与默认值必须与 §10.1 逐字一致。
+本文覆盖第 10 章：`plugins.persona` 的**全量配置键表（权威）**、示例配置、环境变量覆盖、`personas`/`bindings` 结构与校验规则。其它文档引用的键名与默认值必须与 §10.1 逐字一致。
 
 配置经 `PluginContext.Config`（`*bot.Config`）读取，全部键为**扁平 `snake_case`**。扁平键的原因见 §10.3。`Config` 无 `Float` 方法，浮点键（`llm_temperature`、`mention_reply_probability`、`random_probability`）用 `Get` + 类型断言读取。
 
@@ -16,13 +16,13 @@
 | `trigger_keywords` | []string | `[]` | 关键词寻址，大小写不敏感子串匹配；空表示关闭 |
 | `trigger_min_chars` | int | `2` | 短于该长度的文本只记历史不参与（按 rune 计） |
 | `ignore_bots` | bool | `true` | 忽略机器人发送者 |
-| `respond_to_commands` | bool | `false` | 是否允许其它 `/xxx` 命令触发 LLM（`/agent` 永不触发） |
+| `respond_to_commands` | bool | `false` | 是否允许其它 `/xxx` 命令触发 LLM（`/persona` 永不触发） |
 | `group_policy` | string | `open` | 群聊名单模式：`off`（全部不参与）/`open`（全部参与）/`whitelist`（仅 `group_list` 内）/`blacklist`（`group_list` 外） |
 | `group_list` | []string | `[]` | 群聊名单，匹配 `ev.Channel.ID`（频道 ID） |
 | `private_policy` | string | `off` | 私聊名单模式：语义同 `group_policy`，但匹配 `private_list` |
 | `private_list` | []string | `[]` | 私聊名单，匹配 `ev.Sender.ID`（发送者 ID） |
 | `mention_reply_probability` | float | `1.0` | 被寻址时的回复概率 |
-| `mention_min_interval` | duration | `10s` | 被寻址时的最小回复间隔（自 `lastAgentAt` 起算） |
+| `mention_min_interval` | duration | `10s` | 被寻址时的最小回复间隔（自 `lastReplyAt` 起算） |
 | `random_enabled` | bool | `true` | 是否允许非寻址随机插话 |
 | `random_probability` | float | `0.12` | 单条非寻址消息的插话概率 |
 | `random_cooldown` | duration | `90s` | 两次自发插话的最小间隔 |
@@ -36,7 +36,7 @@
 | `context_max_messages` | int | `20` | 每会话保留的历史条数 |
 | `context_max_channels` | int | `512` | 内存中最多跟踪的会话数（LRU 淘汰） |
 | `llm_base_url` | string | `https://api.openai.com/v1` | OpenAI 兼容 API 根地址 |
-| `llm_api_key` | string | `""` | 密钥，可留空：留空时不发送 `Authorization` 头（本地/无鉴权推理服务）；建议用 `KEI_PLUGINS_AGENT_LLM_API_KEY` 注入 |
+| `llm_api_key` | string | `""` | 密钥，可留空：留空时不发送 `Authorization` 头（本地/无鉴权推理服务）；建议用 `KEI_PLUGINS_PERSONA_LLM_API_KEY` 注入 |
 | `llm_model` | string | 无（必填） | 模型名 |
 | `llm_temperature` | float | `0.8` | 全局采样温度 |
 | `llm_max_tokens` | int | `200` | 全局最大生成 token |
@@ -51,13 +51,13 @@
 | `limits_max_concurrent` | int | `2` | 全局并发 LLM 调用上限 |
 | `debug_prompts` | bool | `false` | 是否 Debug 输出发往 LLM 的请求与响应 |
 
-`plugins.agent.enabled` 由 kei 读取（布尔或标量简写），不进入插件配置，也不在上表内。
+`plugins.persona.enabled` 由 kei 读取（布尔或标量简写），不进入插件配置，也不在上表内。
 
 ## 10.2 示例配置
 
 ```yaml
 plugins:
-  agent:
+  persona:
     enabled: true
 
     # ---- 人格 ----
@@ -156,7 +156,7 @@ kei 的规则（`internal/config/env.go` `applyPluginEnv`/`setSetting`）：
 
 - 形如 `KEI_PLUGINS_<NAME>_<KEY>` 的环境变量把 **扁平键** 写入 `plugins.<name>` 的 `Settings`（除 `enabled` 外）。
 - `-` 与 `.` 与 `_` 等价、大小写不敏感（`canonicalName` 规范化）。
-- 环境变量名按 `_` 切分后逐段规范化，因此 `KEI_PLUGINS_AGENT_LLM_API_KEY` 映射到顶层键 `llm_api_key`（而不是嵌套的 `llm.api.key`）。
+- 环境变量名按 `_` 切分后逐段规范化，因此 `KEI_PLUGINS_PERSONA_LLM_API_KEY` 映射到顶层键 `llm_api_key`（而不是嵌套的 `llm.api.key`）。
 - 只有配置中已存在的插件名才会被命中。
 
 **本插件全部采用扁平 `snake_case` 键**，正是为了让上述扁平键映射能命中每一个配置项。
@@ -165,16 +165,16 @@ kei 的规则（`internal/config/env.go` `applyPluginEnv`/`setSetting`）：
 
 ```bash
 # 密钥注入（推荐）
-export KEI_PLUGINS_AGENT_LLM_API_KEY="sk-xxxx"
+export KEI_PLUGINS_PERSONA_LLM_API_KEY="sk-xxxx"
 
 # 数值覆盖（convertValue 会转成数值类型）
-export KEI_PLUGINS_AGENT_RANDOM_PROBABILITY=0.3
+export KEI_PLUGINS_PERSONA_RANDOM_PROBABILITY=0.3
 
 # 布尔覆盖
-export KEI_PLUGINS_AGENT_DEBUG_PROMPTS=true
+export KEI_PLUGINS_PERSONA_DEBUG_PROMPTS=true
 ```
 
-限制：`personas`/`bindings`/`llm_extra_headers`/`group_list`/`private_list` 这类**复合结构不支持环境变量覆盖**（环境变量只能写扁平标量键），必须写在 YAML 里。模式键 `group_policy`/`private_policy` 是标量，可用环境变量覆盖（如 `KEI_PLUGINS_AGENT_PRIVATE_POLICY=open`）。
+限制：`personas`/`bindings`/`llm_extra_headers`/`group_list`/`private_list` 这类**复合结构不支持环境变量覆盖**（环境变量只能写扁平标量键），必须写在 YAML 里。模式键 `group_policy`/`private_policy` 是标量，可用环境变量覆盖（如 `KEI_PLUGINS_PERSONA_PRIVATE_POLICY=open`）。
 
 ## 10.4 校验规则
 
@@ -183,7 +183,7 @@ export KEI_PLUGINS_AGENT_DEBUG_PROMPTS=true
 统一错误格式：
 
 ```text
-agent: 配置错误 <key>=<值>: <原因>
+persona: 配置错误 <key>=<值>: <原因>
 ```
 
 `<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。
@@ -191,12 +191,12 @@ agent: 配置错误 <key>=<值>: <原因>
 固定示例：
 
 ```text
-agent: 配置错误 default_persona=cat: 未在 personas 中定义
-agent: 配置错误 personas=: 必须是非空对象
-agent: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数
-agent: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式
-agent: 配置错误 context_max_messages=0: 必须 >= 1
-agent: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一
+persona: 配置错误 default_persona=cat: 未在 personas 中定义
+persona: 配置错误 personas=: 必须是非空对象
+persona: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数
+persona: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式
+persona: 配置错误 context_max_messages=0: 必须 >= 1
+persona: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一
 ```
 
 逐键规则（覆盖 §10.1 全部键）：
@@ -246,4 +246,4 @@ agent: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之
 | `limits_max_concurrent` | 必须 >= 1 |
 | `debug_prompts` | 无额外校验 |
 
-补充：缺少 network 权限时 `PluginContext.HTTPClient == nil`，`Setup` 额外返回 `agent: 需要 network 权限`（见 [`llm.md`](llm.md) §9.1）。
+补充：缺少 network 权限时 `PluginContext.HTTPClient == nil`，`Setup` 额外返回 `persona: 需要 network 权限`（见 [`llm.md`](llm.md) §9.1）。

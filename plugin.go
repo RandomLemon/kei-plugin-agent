@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -20,7 +20,7 @@ const (
 	storageTimeout = time.Second
 )
 
-// Plugin 是 agent 插件的实例状态。
+// Plugin 是 persona 插件的实例状态。
 //
 // 实例在 init() 时构造（此时无配置、无依赖），运行期依赖只能在 Setup/Start
 // 阶段装配。全部可变状态都挂在本结构上，禁止包级可变状态。
@@ -67,7 +67,7 @@ type Plugin struct {
 func (p *Plugin) Setup(ctx context.Context, reg bot.Registrar) error {
 	pc, ok := bot.PluginContextFrom(ctx)
 	if !ok {
-		return errors.New("agent: 缺少 PluginContext")
+		return errors.New("persona: 缺少 PluginContext")
 	}
 	return p.setup(pc, reg)
 }
@@ -75,7 +75,7 @@ func (p *Plugin) Setup(ctx context.Context, reg bot.Registrar) error {
 // setup 是 Setup 的可测内核：直接接收已解析的 PluginContext。
 func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	if pc.HTTPClient == nil {
-		return errors.New("agent: 需要 network 权限")
+		return errors.New("persona: 需要 network 权限")
 	}
 	cfg, err := loadConfig(pc.Config)
 	if err != nil {
@@ -104,13 +104,13 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	p.completer = newOpenAIClient(cfg, pc.HTTPClient, log)
 
 	reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
-		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("agent:group"))
+		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("persona:group"))
 
 	reg.OnEvent(bot.EventMessage, p.handlePrivateMessage,
-		bot.WithKind(bot.MessagePrivate), bot.WithPriority(0), bot.WithID("agent:private"))
+		bot.WithKind(bot.MessagePrivate), bot.WithPriority(0), bot.WithID("persona:private"))
 
-	reg.OnCommand("agent", p.handleCommand,
-		bot.WithAdmin(), bot.WithPriority(100), bot.WithID("agent:admin"))
+	reg.OnCommand("persona", p.handleCommand,
+		bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 	return nil
 }
 

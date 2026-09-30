@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -343,7 +343,7 @@ func newTestEnvWith(t *testing.T, llm http.Handler, mutate func(map[string]any),
 	p := &Plugin{}
 
 	pc := bot.PluginContext{
-		Name:       "agent",
+		Name:       "persona",
 		Config:     bot.NewConfig(cfg),
 		Logger:     slog.New(cap),
 		Storage:    store,
@@ -376,17 +376,17 @@ func newTestEnvWith(t *testing.T, llm http.Handler, mutate func(map[string]any),
 }
 
 func (e *testEnv) groupHandler() bot.Handler {
-	h := e.reg.byID("agent:group")
+	h := e.reg.byID("persona:group")
 	if h == nil {
-		e.t.Fatal("agent:group 规则未注册")
+		e.t.Fatal("persona:group 规则未注册")
 	}
 	return h
 }
 
 func (e *testEnv) commandHandler() bot.Handler {
-	h := e.reg.byID("agent:admin")
+	h := e.reg.byID("persona:admin")
 	if h == nil {
-		e.t.Fatal("agent:admin 规则未注册")
+		e.t.Fatal("persona:admin 规则未注册")
 	}
 	return h
 }
@@ -396,11 +396,11 @@ func (e *testEnv) deliver(ev *bot.Event) error {
 	return e.groupHandler()(context.Background(), ev, bot.NewNoopReply())
 }
 
-// command 投递一条 /agent 命令。
+// command 投递一条 /persona 命令。
 func (e *testEnv) command(args ...string) string {
 	e.t.Helper()
 	ev := groupEvent("g1", "u1", "张三", "")
-	ev.Command = &bot.Command{Name: "agent", Args: args}
+	ev.Command = &bot.Command{Name: "persona", Args: args}
 	r := bot.NewNoopReply()
 	if err := e.commandHandler()(context.Background(), ev, r); err != nil {
 		e.t.Fatalf("command %v: %v", args, err)
@@ -474,11 +474,11 @@ func privateEvent(userID, userName, text string) *bot.Event {
 	}
 }
 
-// privateHandler 返回 agent:private 规则的 Handler。
+// privateHandler 返回 persona:private 规则的 Handler。
 func (e *testEnv) privateHandler() bot.Handler {
-	h := e.reg.byID("agent:private")
+	h := e.reg.byID("persona:private")
 	if h == nil {
-		e.t.Fatal("agent:private 规则未注册")
+		e.t.Fatal("persona:private 规则未注册")
 	}
 	return h
 }
@@ -488,11 +488,11 @@ func (e *testEnv) deliverPrivate(ev *bot.Event) error {
 	return e.privateHandler()(context.Background(), ev, bot.NewNoopReply())
 }
 
-// privateCommand 投递一条来自私聊的 /agent 命令，返回回复文本。
+// privateCommand 投递一条来自私聊的 /persona 命令，返回回复文本。
 func (e *testEnv) privateCommand(userID string, args ...string) string {
 	e.t.Helper()
 	ev := privateEvent(userID, "张三", "")
-	ev.Command = &bot.Command{Name: "agent", Args: args}
+	ev.Command = &bot.Command{Name: "persona", Args: args}
 	r := bot.NewNoopReply()
 	if err := e.commandHandler()(context.Background(), ev, r); err != nil {
 		e.t.Fatalf("private command %v: %v", args, err)

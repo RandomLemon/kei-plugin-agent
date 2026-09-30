@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -216,11 +216,11 @@ func TestOpenAIClientDebugLogsRequestAndResponse(t *testing.T) {
 	if got != "打球可以啊" {
 		t.Fatalf("content = %q", got)
 	}
-	reqBody := cap.attrOf("agent llm 请求", "body")
+	reqBody := cap.attrOf("persona llm 请求", "body")
 	if !strings.Contains(reqBody, `"content":"u"`) || !strings.Contains(reqBody, `"max_tokens":10`) {
 		t.Fatalf("请求日志缺少请求体: %q", reqBody)
 	}
-	respBody := cap.attrOf("agent llm 响应", "body")
+	respBody := cap.attrOf("persona llm 响应", "body")
 	if !strings.Contains(respBody, "打球可以啊") {
 		t.Fatalf("响应日志缺少响应体: %q", respBody)
 	}
@@ -239,7 +239,7 @@ func TestOpenAIClientDebugOffSilent(t *testing.T) {
 	if _, err := c.Complete(context.Background(), completionRequest{}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if cap.hasMsg("agent llm 请求") || cap.hasMsg("agent llm 响应") {
+	if cap.hasMsg("persona llm 请求") || cap.hasMsg("persona llm 响应") {
 		t.Fatal("debug_prompts=false 时不应输出请求/响应日志")
 	}
 }
@@ -265,7 +265,7 @@ func TestOpenAIClientDebugLogsErrorResponseBody(t *testing.T) {
 			if _, err := c.Complete(context.Background(), completionRequest{}); err == nil {
 				t.Fatal("应返回错误")
 			}
-			if got := cap.attrOf("agent llm 响应", "body"); got != tc.body {
+			if got := cap.attrOf("persona llm 响应", "body"); got != tc.body {
 				t.Fatalf("响应日志 body = %q", got)
 			}
 		})

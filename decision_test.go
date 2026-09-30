@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -83,18 +83,18 @@ func TestFilterReasons(t *testing.T) {
 			t.Fatal("want command")
 		}
 	})
-	t.Run("agent_command_not_in_history", func(t *testing.T) {
+	t.Run("persona_command_not_in_history", func(t *testing.T) {
 		env := newTestEnv(t, nil, nil)
 		st := env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
 		before := len(st.snapshotHistory(100))
 		ev := groupEvent("g1", "u1", "张三", "hi")
-		ev.Command = &bot.Command{Name: "agent", Args: []string{"status"}}
+		ev.Command = &bot.Command{Name: "persona", Args: []string{"status"}}
 		_ = env.deliver(ev)
 		if !env.cap.has("command") {
 			t.Fatal("want command")
 		}
 		if after := len(st.snapshotHistory(100)); after != before {
-			t.Fatalf("史条数 %d -> %d，/agent 不应进历史", before, after)
+			t.Fatalf("史条数 %d -> %d，/persona 不应进历史", before, after)
 		}
 	})
 	t.Run("empty_text", func(t *testing.T) {
@@ -273,7 +273,7 @@ func TestFirstMessageDeferredUntilLoaded(t *testing.T) {
 		if !env.waitSends(1, 3*time.Second) {
 			t.Fatal("补判应触发回复")
 		}
-		if body := env.cap.attrOf("agent llm 请求", "body"); !strings.Contains(body, "傲娇") {
+		if body := env.cap.attrOf("persona llm 请求", "body"); !strings.Contains(body, "傲娇") {
 			t.Fatalf("补判生成未使用加载到的人格覆盖: %q", body)
 		}
 	})
@@ -472,26 +472,26 @@ func TestStatusAndPersonaCommands(t *testing.T) {
 	env := newTestEnv(t, nil, nil)
 	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
 
-	if got := env.command("status"); got != "agent: 开 · persona=default(default) · 历史 0 条 · 近 1 小时回复 0/6 · 上次回复 从未 · llm 错误 0 · 已跳 0" {
+	if got := env.command("status"); got != "persona: 开 · persona=default(default) · 历史 0 条 · 近 1 小时回复 0/6 · 上次回复 从未 · llm 错误 0 · 已跳 0" {
 		t.Fatalf("status = %q", got)
 	}
-	if got := env.command("persona"); got != "agent: persona=default 来源=default" {
+	if got := env.command("persona"); got != "persona: persona=default 来源=default" {
 		t.Fatalf("persona = %q", got)
 	}
-	if got := env.command("persona", "tsundere"); got != "agent: persona=tsundere" {
+	if got := env.command("persona", "tsundere"); got != "persona: persona=tsundere" {
 		t.Fatalf("persona set = %q", got)
 	}
-	if got := env.command("persona"); got != "agent: persona=tsundere 来源=override" {
+	if got := env.command("persona"); got != "persona: persona=tsundere 来源=override" {
 		t.Fatalf("persona after set = %q", got)
 	}
-	if got := env.command("persona", "nope"); got != "agent: 未找到人格 nope" {
+	if got := env.command("persona", "nope"); got != "persona: 未找到人格 nope" {
 		t.Fatalf("persona unknown = %q", got)
 	}
-	if got := env.command("bogus"); got != agentUsage() {
+	if got := env.command("bogus"); got != personaUsage() {
 		t.Fatalf("unknown = %q", got)
 	}
 	// 覆盖应写穿透到 Storage。
-	key := "agent:override:mock:bot1:g1"
+	key := "persona:override:mock:bot1:g1"
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if v, ok := env.store.value(key); ok && v != "" {
@@ -745,16 +745,16 @@ func TestPrivateReplyOmitsAtSegment(t *testing.T) {
 
 func TestPrivateRuleRegistered(t *testing.T) {
 	env := newTestEnv(t, nil, nil)
-	rule := env.reg.rule("agent:private")
+	rule := env.reg.rule("persona:private")
 	if rule == nil {
-		t.Fatal("agent:private 未注册")
+		t.Fatal("persona:private 未注册")
 	}
 	if rule.EventType != bot.EventMessage || rule.Kind != bot.MessagePrivate {
 		t.Fatalf("private 规则过滤错误: type=%q kind=%q", rule.EventType, rule.Kind)
 	}
-	group := env.reg.rule("agent:group")
+	group := env.reg.rule("persona:group")
 	if group == nil || group.Kind != bot.MessageGroup {
-		t.Fatalf("agent:group 规则异常: %+v", group)
+		t.Fatalf("persona:group 规则异常: %+v", group)
 	}
 }
 
@@ -768,7 +768,7 @@ func TestPrivatePeersHaveDistinctKeys(t *testing.T) {
 	if overrideKey(st1.key) == overrideKey(st2.key) {
 		t.Fatalf("私聊对端覆盖键碰撞: %q", overrideKey(st1.key))
 	}
-	if got := overrideKey(st1.key); got != "agent:override:mock:bot1:user:u1" {
+	if got := overrideKey(st1.key); got != "persona:override:mock:bot1:user:u1" {
 		t.Fatalf("覆盖键 = %q", got)
 	}
 	if st1.kind != bot.MessagePrivate || st1.peerUserID != "u1" {

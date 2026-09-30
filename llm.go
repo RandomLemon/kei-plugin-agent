@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"bytes"
@@ -96,16 +96,16 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", false, fmt.Errorf("agent: 请求编码失败: %w", err)
+		return "", false, fmt.Errorf("persona: 请求编码失败: %w", err)
 	}
 	if c.debug {
-		c.log.Debug("agent llm 请求", "host", hostOf(c.baseURL), "model", c.model, "body", truncateRunes(string(body), 2048))
+		c.log.Debug("persona llm 请求", "host", hostOf(c.baseURL), "model", c.model, "body", truncateRunes(string(body), 2048))
 	}
 
 	endpoint := trimRightSlash(c.baseURL) + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(actx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", false, fmt.Errorf("agent: 构造请求失败: %w", err)
+		return "", false, fmt.Errorf("persona: 构造请求失败: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -121,22 +121,22 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 		if ctx.Err() != nil {
 			return "", false, err
 		}
-		return "", true, fmt.Errorf("agent: llm 请求失败: %w", err)
+		return "", true, fmt.Errorf("persona: llm 请求失败: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", true, fmt.Errorf("agent: 读取响应失败: %w", err)
+		return "", true, fmt.Errorf("persona: 读取响应失败: %w", err)
 	}
 	if c.debug {
-		c.log.Debug("agent llm 响应", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode, "body", truncateRunes(string(data), 2048))
+		c.log.Debug("persona llm 响应", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode, "body", truncateRunes(string(data), 2048))
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return "", true, fmt.Errorf("agent: llm http %d: %s", resp.StatusCode, snippet(data))
+		return "", true, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
 	if resp.StatusCode >= 400 {
-		return "", false, fmt.Errorf("agent: llm http %d: %s", resp.StatusCode, snippet(data))
+		return "", false, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
 	content, err := parseCompletion(data)
 	if err != nil {
@@ -155,14 +155,14 @@ func parseCompletion(data []byte) (string, error) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("agent: llm 响应解析失败: %w", err)
+		return "", fmt.Errorf("persona: llm 响应解析失败: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("agent: llm 响应缺少 choices")
+		return "", fmt.Errorf("persona: llm 响应缺少 choices")
 	}
 	var content string
 	if err := json.Unmarshal(resp.Choices[0].Message.Content, &content); err != nil {
-		return "", fmt.Errorf("agent: llm 响应的 content 不是字符串（可能只返回 reasoning_content）")
+		return "", fmt.Errorf("persona: llm 响应的 content 不是字符串（可能只返回 reasoning_content）")
 	}
 	return content, nil
 }

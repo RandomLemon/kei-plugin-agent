@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -27,7 +27,7 @@ func TestStageCtxCancelDoesNotKillRuntime(t *testing.T) {
 	reg := &fakeRegistrar{}
 	p := &Plugin{}
 	pc := bot.PluginContext{
-		Name:       "agent",
+		Name:       "persona",
 		Config:     bot.NewConfig(cfg),
 		Logger:     slog.New(&logCapture{}),
 		Storage:    newFakeStorage(),
@@ -44,9 +44,9 @@ func TestStageCtxCancelDoesNotKillRuntime(t *testing.T) {
 	cancelStage() // 模拟 kei 阶段结束时的 defer cancel()
 	t.Cleanup(func() { _ = p.Stop(context.Background()) })
 
-	h := reg.byID("agent:private")
+	h := reg.byID("persona:private")
 	if h == nil {
-		t.Fatal("agent:private 规则未注册")
+		t.Fatal("persona:private 规则未注册")
 	}
 	// 首条过短消息只为建立并加载会话状态。
 	_ = h(context.Background(), privateEvent("u1", "张三", "a"), bot.NewNoopReply())
@@ -81,7 +81,7 @@ func TestStopWaitsForPendingWrite(t *testing.T) {
 	}
 	p := &Plugin{}
 	pc := bot.PluginContext{
-		Name:       "agent",
+		Name:       "persona",
 		Config:     bot.NewConfig(baseConfigMap("http://127.0.0.1:1/v1")),
 		Logger:     slog.New(&logCapture{}),
 		Storage:    store,

@@ -6,16 +6,16 @@
 
 ## 7.1 事件过滤
 
-Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进入 Handler 的消息都先写入历史**（含被下述条件过滤的），例外有三：`/agent` 命令与其它命令消息（命令不入历史）、被名单策略拒绝的会话消息（在记历史前就返回，不建会话状态，见 §7.8）。
+Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进入 Handler 的消息都先写入历史**（含被下述条件过滤的），例外有三：`/persona` 命令与其它命令消息（命令不入历史）、被名单策略拒绝的会话消息（在记历史前就返回，不建会话状态，见 §7.8）。
 
 | 顺序 | 条件 | 未通过时 reason |
 | --- | --- | --- |
 | 1 | 会话类型不匹配（群 Handler：`ev.Message == nil` 或 `Kind != bot.MessageGroup`；私聊 Handler：`ev.Message == nil` 或 `Kind != bot.MessagePrivate`） | `not_group` / `not_private` |
 | 2 | 无发送者（`ev.Sender == nil`） | `no_sender` |
-| 3 | `/agent` 命令（`ev.Command != nil && ev.Command.Name == "agent"`）——**无条件**，且不进历史 | `command` |
+| 3 | `/persona` 命令（`ev.Command != nil && ev.Command.Name == "persona"`）——**无条件**，且不进历史 | `command` |
 | 4 | 名单策略拒绝（群聊按 `ev.Channel.ID`，私聊按 `ev.Sender.ID`；模式见 §7.8）——**在建立会话状态与记历史之前**返回 | `not_allowed` |
 | — | 记历史：`ev.Command == nil` 时把本消息写入历史；命令与被拒会话一律不进历史 | — |
-| 5 | 会话被 `/agent off` 关闭 | `channel_off` |
+| 5 | 会话被 `/persona off` 关闭 | `channel_off` |
 | 6 | Storage 懒加载未完成（本条**暂存**进 `pending` 单槽，加载完成后补判一次，见 §7.6） | `loading` |
 | 7 | 机器人发送者且 `ignore_bots=true` | `bot_sender` |
 | 8 | 命令消息且 `respond_to_commands=false` | `command` |
@@ -24,8 +24,8 @@ Handler 收到群消息或私聊消息后，按固定顺序过滤。**所有进�
 
 要点：
 
-- `/agent` 命令在第 3 步就被无条件丢弃，原因见 [`architecture.md`](architecture.md) 第 6 章：`OnCommand("agent", ...)` 与消息规则会被**同时执行**。
-- 名单策略在第 4 步判定，早于 `stateFor`：被拒会话不建 `channelState`、不触发 Storage 懒加载、不进历史。诊断时用日志字段 `channel=<会话键>` 配合 `/agent policy` 输出区分拒绝原因。
+- `/persona` 命令在第 3 步就被无条件丢弃，原因见 [`architecture.md`](architecture.md) 第 6 章：`OnCommand("persona", ...)` 与消息规则会被**同时执行**。
+- 名单策略在第 4 步判定，早于 `stateFor`：被拒会话不建 `channelState`、不触发 Storage 懒加载、不进历史。诊断时用日志字段 `channel=<会话键>` 配合 `/persona policy` 输出区分拒绝原因。
 - 过滤顺序固定，日志 reason 取决于**第一个**未通过的条件。
 - 第 6 步（Storage 懒加载未完成）**不丢消息**：本条被暂存进 `channelState.pending` 单槽、按 `loading` 记日志，`Storage.Get` 返回后由 `finishLoad` 补判一次（判定依据是加载后的 `disabled`/`persona` 真值，见 [`architecture.md`](architecture.md) §4.5）。因此首次出现的会话、进程重启后、被 LRU 淘汰后的**第一条消息都会得到回复**；加载窗口内连发多条时只补判最新一条，更早的已进历史。
 - `not_group`/`not_private`/`no_sender` 在第 3 步之前，因此它们是「理论上不会发生」的护栏（规则已按 `WithKind` 限定会话类型，但 Handler 仍自检）。
@@ -54,7 +54,7 @@ addressed = 私聊 || mention || reply_to_self || keyword
 | 1 | `random_enabled = true` | `not_addressed` |
 | 2 | 非 `inflight` 且非 `awaiting` | `inflight` |
 | 3 | 不在 `random_quiet_hours`（按 `random_timezone` 解释，格式 `HH:MM-HH:MM`，支持跨零点） | `quiet_hours` |
-| 4 | 距 `lastAgentAt` ≥ `random_cooldown` | `cooldown` |
+| 4 | 距 `lastReplyAt` ≥ `random_cooldown` | `cooldown` |
 | 5 | 近 1 小时本会话回复数 < `random_max_per_hour` | `hour_quota` |
 | 6 | `random_activity_window` 内不同真人发送者数 ≥ `random_min_participants` | `min_participants` |
 | 7 | `rand.Float64() < random_probability` | `probability` |
@@ -63,7 +63,7 @@ addressed = 私聊 || mention || reply_to_self || keyword
 
 | 顺序 | 条件 | 未通过时 reason |
 | --- | --- | --- |
-| 1 | 距 `lastAgentAt` ≥ `mention_min_interval` | `cooldown` |
+| 1 | 距 `lastReplyAt` ≥ `mention_min_interval` | `cooldown` |
 | 2 | `rand.Float64() < mention_reply_probability`（默认 `1.0`，即被 @ 必回） | `probability` |
 
 说明：
@@ -93,24 +93,24 @@ addressed = 私聊 || mention || reply_to_self || keyword
 ## 7.5 生成与发送
 
 - **信号量**：全局 `limits_max_concurrent`（默认 2），`TryAcquire` 非阻塞获取；失败记 `semaphore_full`，丢弃本轮，不排队。获取成功 `defer Release`。
-- **epoch 机制**：生成协程捕获发起时的 `epoch`。`/agent off`、`/agent persona`、`/agent reset` 会递增 `epoch`；回调或生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」。
+- **epoch 机制**：生成协程捕获发起时的 `epoch`。`/persona off`、`/persona persona`、`/persona reset` 会递增 `epoch`；回调或生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」。
 - **发送**：按会话类型分派，**不用** `TargetFromEvent`：
   - 群聊：`message.Group(segs...)` + `bot.Target{Platform, BotID, ChannelID, Kind: bot.MessageGroup}`（不填 `UserID`）；
   - 私聊：`message.Private(segs...)` + `bot.Target{Platform, BotID, UserID: 对端用户 ID, Kind: bot.MessagePrivate}`（不填 `ChannelID`）。
   最后调用 `p.api.Send(p.ctx, target, msg)`。需要 `send_message` 权限（已在 `Metadata` 声明）。
 - **At 段仅群聊**：`reply_mention_sender=true` 且本轮触发是寻址消息时，在文本段前插入 `message.At(发送者 ID)`；私聊不插入（@ 自己无意义）。
-- **成功后**：回写历史（`Self=true` 的 `Turn`）、把 `MessageID` 记入 ID 环、更新 `lastAgentAt`、`replyTimes` 追加、`replies++`。
+- **成功后**：回写历史（`Self=true` 的 `Turn`）、把 `MessageID` 记入 ID 环、更新 `lastReplyAt`、`replyTimes` 追加、`replies++`。
 - **失败**：只记 `Warn`（核心自带重试），**不重排、不重发**，reason `send_error`。
 
 ## 7.6 决策伪代码
 
 ```text
-onGroupMessage(ev):                              # agent:group（WithKind=MessageGroup）
+onGroupMessage(ev):                              # persona:group（WithKind=MessageGroup）
   if ev.Sender == nil:                            return log(decision="skip", reason="no_sender")
   if ev.Message == nil || ev.Message.Kind != group: return log(decision="skip", reason="not_group")
   return handleChat(ev)
 
-onPrivateMessage(ev):                            # agent:private（WithKind=MessagePrivate）
+onPrivateMessage(ev):                            # persona:private（WithKind=MessagePrivate）
   if ev.Sender == nil:                            return log(decision="skip", reason="no_sender")
   if ev.Message == nil || ev.Message.Kind != private: return log(decision="skip", reason="not_private")
   return handleChat(ev)
@@ -118,7 +118,7 @@ onPrivateMessage(ev):                            # agent:private（WithKind=Mess
 handleChat(ev):
   # 入站：本函数必须在毫秒级返回，禁止任何网络调用或阻塞等待
   key, _, _, channelID = channelKey(ev)           # 群聊 platform:botID:channelID；私聊 platform:botID:user:<senderID>
-  if ev.Command != nil && ev.Command.Name == "agent":
+  if ev.Command != nil && ev.Command.Name == "persona":
                                                   return log(decision="skip", reason="command")   # 无条件，且不进历史
   if ev.Message.Kind == private:
     if !policyAllowsPrivate(ev.Sender.ID):         return log(decision="skip", reason="not_allowed")  # 早于 stateFor
@@ -143,13 +143,13 @@ decide(st, ev, text):
               hasMention(ev, self_ids) || isReplyToSelf(ev) || hasKeyword(text, trigger_keywords)
   now = p.now()
   if addressed:
-    if now - st.lastAgentAt < mention_min_interval:  return log(decision="skip", reason="cooldown")
+    if now - st.lastReplyAt < mention_min_interval:  return log(decision="skip", reason="cooldown")
     if p.randFloat() >= mention_reply_probability:   return log(decision="skip", reason="probability")
     return schedule(st, "addressed")
   if !random_enabled:                                      return log(decision="skip", reason="not_addressed")
   if st.inflight || st.awaiting:                           return log(decision="skip", reason="inflight")
   if inQuietHours(now, random_quiet_hours, random_timezone): return log(decision="skip", reason="quiet_hours")
-  if now - st.lastAgentAt < random_cooldown:               return log(decision="skip", reason="cooldown")
+  if now - st.lastReplyAt < random_cooldown:               return log(decision="skip", reason="cooldown")
   if st.repliesInWindow(now, 1h) >= random_max_per_hour:   return log(decision="skip", reason="hour_quota")
   if st.distinctHumans(now, random_activity_window) < random_min_participants:
                                                           return log(decision="skip", reason="min_participants")
@@ -239,16 +239,16 @@ generate(st, epoch, history):
   if err != nil:
     st.mu.Unlock()
     return log(decision="skip", reason="send_error", err=err)
-  st.lastAgentAt = p.now()
-  st.replyTimes = append(st.replyTimes, st.lastAgentAt)
-  st.appendHistory(Turn{At: st.lastAgentAt, Name: personaDisplayName(personaName), Text: reply, Self: true})
+  st.lastReplyAt = p.now()
+  st.replyTimes = append(st.replyTimes, st.lastReplyAt)
+  st.appendHistory(Turn{At: st.lastReplyAt, Name: personaDisplayName(personaName), Text: reply, Self: true})
   p.rememberReplyID(res.MessageID)                    # 入方向 128 条 ID 环
   st.replies++
   st.mu.Unlock()
   return log(decision="reply", kind=st.pendingKind)
 ```
 
-`log(...)` 的输出契约：`decision=reply` 行含 `kind=addressed|random`；`decision=skip` 行必须含 `reason="<token>"`，`channel=<key>`、`sender=<id>` 为固定字段；`debug_prompts=true` 时由 LLM 客户端以 `agent llm 请求` 输出请求体、以 `agent llm 响应` 输出响应体（`body` 各截断 2048 字符，见 [`llm.md`](llm.md) §9.5）。
+`log(...)` 的输出契约：`decision=reply` 行含 `kind=addressed|random`；`decision=skip` 行必须含 `reason="<token>"`，`channel=<key>`、`sender=<id>` 为固定字段；`debug_prompts=true` 时由 LLM 客户端以 `persona llm 请求` 输出请求体、以 `persona llm 响应` 输出响应体（`body` 各截断 2048 字符，见 [`llm.md`](llm.md) §9.5）。
 
 ### 状态机
 
@@ -256,10 +256,10 @@ generate(st, epoch, history):
                判定通过
    idle ──────────────────▶ awaiting ──(窗口结束)──▶ inflight ──(完成/失败)──▶ idle
      ▲                        │                          │
-     │                        │ /agent off / reset:      │ epoch 变化: 丢弃结果
+     │                        │ /persona off / reset:    │ epoch 变化: 丢弃结果
      └────────────────────────┴── disabled 或 epoch 变化 ─┘   （reason=stale）
 
-   disabled: 会话被 /agent off 关闭，所有入站直接 channel_off；/agent on 恢复。
+   disabled: 会话被 /persona off 关闭，所有入站直接 channel_off；/persona on 恢复。
    epoch 变化: 定时器回调丢弃（epoch != captured），生成协程丢弃结果（stale）。
 ```
 
@@ -280,10 +280,10 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 | `no_sender` | 无发送者（护栏） |
 | `not_allowed` | 被名单策略拒绝（`off` 或白/黑名单未放行，见 §7.8） |
 | `bot_sender` | 机器人发送者且 `ignore_bots=true` |
-| `command` | 命令消息（`/agent` 无条件丢弃；其它命令视 `respond_to_commands`） |
+| `command` | 命令消息（`/persona` 无条件丢弃；其它命令视 `respond_to_commands`） |
 | `too_short` | 文本短于 `trigger_min_chars` |
 | `empty_text` | 文本为空 |
-| `channel_off` | 会话被 `/agent off` 关闭 |
+| `channel_off` | 会话被 `/persona off` 关闭 |
 | `loading` | Storage 懒加载未完成（本条已暂存 `pending` 单槽，加载完成后补判） |
 | `not_addressed` | 非寻址且 `random_enabled=false` |
 | `probability` | 概率判定未通过（寻址或随机） |
@@ -330,22 +330,22 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 
 **配置默认**（[`configuration.md`](configuration.md) §10.1）：`group_policy=open`、`group_list=[]`、`private_policy=off`、`private_list=[]`。即升级后群聊行为不变，私聊默认关闭；要启用私聊须显式配置或运行期切换。
 
-**运行期切换（`/agent` 子命令，仅管理员，不做 LLM 调用、不进历史）**
+**运行期切换（`/persona` 子命令，仅管理员，不做 LLM 调用、不进历史）**
 
 | 命令 | 行为 | 输出（逐字） |
 | --- | --- | --- |
-| `/agent policy` | 打印两侧模式与名单条数 | `agent: group=open(0) · private=off(0)` |
-| `/agent policy group <mode>` | 设置群聊模式 | `agent: group=whitelist(0)` |
-| `/agent policy private <mode>` | 设置私聊模式 | `agent: private=blacklist(1)` |
-| `/agent list` | 打印两侧名单 | `agent: group=[g1 g2] private=[]` |
-| `/agent list group` | 打印单侧名单 | `agent: group=[g1 g2]` |
-| `/agent list group add g9` | 追加 ID（已存在则幂等） | `agent: group=[g1 g2 g9]` |
-| `/agent list group del g9` | 移除 ID（不存在则幂等） | `agent: group=[g1 g2]` |
+| `/persona policy` | 打印两侧模式与名单条数 | `persona: group=open(0) · private=off(0)` |
+| `/persona policy group <mode>` | 设置群聊模式 | `persona: group=whitelist(0)` |
+| `/persona policy private <mode>` | 设置私聊模式 | `persona: private=blacklist(1)` |
+| `/persona list` | 打印两侧名单 | `persona: group=[g1 g2] private=[]` |
+| `/persona list group` | 打印单侧名单 | `persona: group=[g1 g2]` |
+| `/persona list group add g9` | 追加 ID（已存在则幂等） | `persona: group=[g1 g2 g9]` |
+| `/persona list group del g9` | 移除 ID（不存在则幂等） | `persona: group=[g1 g2]` |
 
-- `<mode>` 必须是 `off`/`open`/`whitelist`/`blacklist` 之一，作用域必须是 `group`/`private`；参数非法或缺参回 `/agent` 用法文本（[`persona.md`](persona.md) §8.4）。
+- `<mode>` 必须是 `off`/`open`/`whitelist`/`blacklist` 之一，作用域必须是 `group`/`private`；参数非法或缺参回 `/persona` 用法文本（[`persona.md`](persona.md) §8.4）。
 - ID 以**单空格**分隔；空名单渲染为 `[]`。
 - 只有真正发生变更时才写穿透；重复设置同一模式、`add` 已存在、`del` 不存在都不产生 `Storage.Set`。
 
-**持久化**：键 `agent:policy`，值 JSON 形状见 [`architecture.md`](architecture.md) §4.4。`Start` 阶段同步读一次（1s 超时，失败只 `Warn` 并保留配置默认值）；写穿透异步（1s 超时，失败只 `Warn`）。逐字段覆盖：模式为空或非法不覆盖，列表为 `null`/缺键不覆盖、为 `[]` 则覆盖为空名单。
+**持久化**：键 `persona:policy`，值 JSON 形状见 [`architecture.md`](architecture.md) §4.4。`Start` 阶段同步读一次（1s 超时，失败只 `Warn` 并保留配置默认值）；写穿透异步（1s 超时，失败只 `Warn`）。逐字段覆盖：模式为空或非法不覆盖，列表为 `null`/缺键不覆盖、为 `[]` 则覆盖为空名单。
 
 **下限保护**：`allowByMode` 对未知模式字符串返回「放行」。配置层与 Storage 层都已过滤非法模式，这个分支只在坏数据绕过两层校验时兜底——宁可多说话，也不要因为一条坏数据把机器人永久静默。

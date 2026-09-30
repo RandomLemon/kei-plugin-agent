@@ -4,9 +4,9 @@
 
 ## 12.1 现状
 
-**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `agent` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
-`docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
+`docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
 质量门与开发环境见 [`testing.md`](testing.md) §11.1。
 
@@ -16,11 +16,11 @@
 
 ### P1 骨架
 
-- `go.mod`（`module github.com/RandomLemon/kei-plugin-agent`，`go 1.25.0`，`require github.com/RandomLemon/kei`）。
+- `go.mod`（`module github.com/RandomLemon/kei-plugin-persona`，`go 1.25.0`，`require github.com/RandomLemon/kei`）。
 - `register.go`：`init()` 注册 + `Metadata`（见 [`architecture.md`](architecture.md) §3.1）。
 - `plugin.go`：`Plugin` 结构、`Setup`/`Start`/`Stop`、从 `PluginContext` 装配 runtime 与注入缝。
 - `config.go`：全部键读取与默认值、`loadConfig` 全部校验（见 [`configuration.md`](configuration.md) §10.4）。
-- 注册两条规则 + 只记历史的 Handler（先不决策）+ `/agent status|on|off`。
+- 注册两条规则 + 只记历史的 Handler（先不决策）+ `/persona status|on|off`。
 - `config_test.go` 覆盖校验规则与固定错误文案。
 
 ### P2 决策
@@ -38,7 +38,7 @@
 ### P4 人格
 
 - `persona.go`：`personas` 解析、`bindings` 匹配与优先级、`persona_template` 渲染、历史渲染。
-- `/agent persona|reset` 子命令与持久化调用。
+- `/persona persona|reset` 子命令与持久化调用。
 - `persona_test.go`：模板 11 个占位符、未知占位符保留、6 种回落占位符、清洗样例、命令输出。
 
 ### P5 持久化与联调
@@ -49,14 +49,14 @@
 
 ### P6 私聊与名单策略
 
-- `bot.WithKind(bot.MessagePrivate)` 私聊规则 `agent:private`：私聊视为寻址、必回（受 `mention_min_interval`/`mention_reply_probability` 约束），不进入随机路径（[`participation.md`](participation.md) §7.2-7.3）。
+- `bot.WithKind(bot.MessagePrivate)` 私聊规则 `persona:private`：私聊视为寻址、必回（受 `mention_min_interval`/`mention_reply_probability` 约束），不进入随机路径（[`participation.md`](participation.md) §7.2-7.3）。
 - 会话类型贯穿状态与渲染：`channelState.kind`/`peerUserID`、`{{chat_kind}}`（[`persona.md`](persona.md) §8.5）、历史块头 `[群聊记录]`/`[私聊记录]`（§8.6）、私聊发送目标 `message.Private` + `Target{UserID, Kind: MessagePrivate}`（§7.5）。
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
-- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/agent policy`、`/agent list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `agent:policy`，`Start` 同步恢复。
+- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `persona:policy`，`Start` 同步恢复。
 
 ## 12.3 已知缺口
 
-- **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/agent status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
+- **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **无多模态输入**：图片/文件等非文本段只作为历史占位符（`[图片]` 等，见 [`persona.md`](persona.md) §8.6），不解析内容。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
 

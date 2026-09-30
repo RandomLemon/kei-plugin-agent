@@ -1,5 +1,5 @@
 {
-  description = "kei-plugin-agent — kei 的「LLM 人格代理」插件（群聊里按人格预设偶尔插话）";
+  description = "kei-plugin-persona — kei 的「LLM 人格代理」插件（群聊里按人格预设偶尔插话）";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -33,7 +33,7 @@
       # 质量门在 devShell 内直接执行 go build / go vet / go test。
       devShells = forAllSystems (system: {
         default = (pkgsFor system).mkShell {
-          name = "kei-plugin-agent";
+          name = "kei-plugin-persona";
 
           packages = devTools (pkgsFor system);
 
@@ -41,7 +41,7 @@
           env.GOTOOLCHAIN = "local";
 
           shellHook = ''
-            echo "kei-plugin-agent dev shell · $(go version)"
+            echo "kei-plugin-persona dev shell · $(go version)"
             echo "常用命令: go build ./... | go vet ./... | go test ./... | go test -race ./... | golangci-lint run"
             if [ ! -d ../kei ]; then
               echo "提示: 本插件依赖同级 kei 检出（go.mod replace ../kei），请先 git clone https://github.com/RandomLemon/kei ../kei"

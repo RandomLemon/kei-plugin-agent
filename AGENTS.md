@@ -1,11 +1,11 @@
 # AGENTS.md
 
-`kei-plugin-agent` 仓库的全局硬性规则与结构概览。**具体设计、接口契约、实现方式不在这里**：按领域拆到 [`docs/`](docs/README.md)（文档索引见 [`docs/README.md`](docs/README.md) §1）。改动某领域前，先读该领域文档与既有实现。
+`kei-plugin-persona` 仓库的全局硬性规则与结构概览。**具体设计、接口契约、实现方式不在这里**：按领域拆到 [`docs/`](docs/README.md)（文档索引见 [`docs/README.md`](docs/README.md) §1）。改动某领域前，先读该领域文档与既有实现。
 
 ## 1. 项目定位
 
-- 项目名 `kei-plugin-agent`，模块路径 `github.com/RandomLemon/kei-plugin-agent`，根包 `agent`。
-- 接入形态：进程内插件。`init()` 调 `bot.RegisterPlugin(&Plugin{})`，宿主空导入 `import _ "github.com/RandomLemon/kei-plugin-agent"` + 配置 `plugins.agent.enabled: true` 即启用；kei 核心零改动。
+- 项目名 `kei-plugin-persona`，模块路径 `github.com/RandomLemon/kei-plugin-persona`，根包 `persona`。
+- 接入形态：进程内插件。`init()` 调 `bot.RegisterPlugin(&Plugin{})`，宿主空导入 `import _ "github.com/RandomLemon/kei-plugin-persona"` + 配置 `plugins.persona.enabled: true` 即启用；kei 核心零改动。
 - 定位与边界（做什么、不做什么、与 kei 的关系）以 [`docs/architecture.md`](docs/architecture.md) 第 1 章为唯一口径；交付物现状见 [`docs/roadmap.md`](docs/roadmap.md) §12.1。
 
 ## 2. 硬性规则

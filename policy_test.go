@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -43,52 +43,52 @@ func TestPolicyAllowMatrix(t *testing.T) {
 func TestPolicyCommandOutputs(t *testing.T) {
 	env := newTestEnv(t, nil, nil)
 
-	if got := env.command("policy"); got != "agent: group=open(0) · private=off(0)" {
+	if got := env.command("policy"); got != "persona: group=open(0) · private=off(0)" {
 		t.Fatalf("policy = %q", got)
 	}
-	if got := env.command("policy", "group", "whitelist"); got != "agent: group=whitelist(0)" {
+	if got := env.command("policy", "group", "whitelist"); got != "persona: group=whitelist(0)" {
 		t.Fatalf("policy group whitelist = %q", got)
 	}
-	if got := env.command("policy"); got != "agent: group=whitelist(0) · private=off(0)" {
+	if got := env.command("policy"); got != "persona: group=whitelist(0) · private=off(0)" {
 		t.Fatalf("policy after set = %q", got)
 	}
-	if got := env.command("list"); got != "agent: group=[] private=[]" {
+	if got := env.command("list"); got != "persona: group=[] private=[]" {
 		t.Fatalf("list = %q", got)
 	}
-	if got := env.command("list", "group", "add", "g1"); got != "agent: group=[g1]" {
+	if got := env.command("list", "group", "add", "g1"); got != "persona: group=[g1]" {
 		t.Fatalf("list add g1 = %q", got)
 	}
-	if got := env.command("list", "group", "add", "g2"); got != "agent: group=[g1 g2]" {
+	if got := env.command("list", "group", "add", "g2"); got != "persona: group=[g1 g2]" {
 		t.Fatalf("list add g2 = %q", got)
 	}
-	if got := env.command("list", "group", "add", "g9"); got != "agent: group=[g1 g2 g9]" {
+	if got := env.command("list", "group", "add", "g9"); got != "persona: group=[g1 g2 g9]" {
 		t.Fatalf("list add g9 = %q", got)
 	}
-	if got := env.command("list", "group", "add", "g9"); got != "agent: group=[g1 g2 g9]" {
+	if got := env.command("list", "group", "add", "g9"); got != "persona: group=[g1 g2 g9]" {
 		t.Fatalf("list add 幂等 = %q", got)
 	}
-	if got := env.command("list", "group", "del", "g9"); got != "agent: group=[g1 g2]" {
+	if got := env.command("list", "group", "del", "g9"); got != "persona: group=[g1 g2]" {
 		t.Fatalf("list del g9 = %q", got)
 	}
-	if got := env.command("list", "group", "del", "nope"); got != "agent: group=[g1 g2]" {
+	if got := env.command("list", "group", "del", "nope"); got != "persona: group=[g1 g2]" {
 		t.Fatalf("list del 不存在应幂等 = %q", got)
 	}
-	if got := env.command("list", "private", "add", "u1"); got != "agent: private=[u1]" {
+	if got := env.command("list", "private", "add", "u1"); got != "persona: private=[u1]" {
 		t.Fatalf("list private add = %q", got)
 	}
-	if got := env.command("list"); got != "agent: group=[g1 g2] private=[u1]" {
+	if got := env.command("list"); got != "persona: group=[g1 g2] private=[u1]" {
 		t.Fatalf("list = %q", got)
 	}
-	if got := env.command("list", "group"); got != "agent: group=[g1 g2]" {
+	if got := env.command("list", "group"); got != "persona: group=[g1 g2]" {
 		t.Fatalf("list group = %q", got)
 	}
-	if got := env.command("list", "private"); got != "agent: private=[u1]" {
+	if got := env.command("list", "private"); got != "persona: private=[u1]" {
 		t.Fatalf("list private = %q", got)
 	}
-	if got := env.command("policy"); got != "agent: group=whitelist(2) · private=off(1)" {
+	if got := env.command("policy"); got != "persona: group=whitelist(2) · private=off(1)" {
 		t.Fatalf("policy 计数 = %q", got)
 	}
-	if got := env.command("policy", "private", "blacklist"); got != "agent: private=blacklist(1)" {
+	if got := env.command("policy", "private", "blacklist"); got != "persona: private=blacklist(1)" {
 		t.Fatalf("policy private blacklist = %q", got)
 	}
 
@@ -104,7 +104,7 @@ func TestPolicyCommandOutputs(t *testing.T) {
 		{"list", "group", "bogus", "x"},
 		{"list", "bogus", "add", "g1"},
 	} {
-		if got := env.command(args...); got != agentUsage() {
+		if got := env.command(args...); got != personaUsage() {
 			t.Fatalf("command %v = %q, want usage", args, got)
 		}
 	}
@@ -175,7 +175,7 @@ func TestPolicyRestoreOnStart(t *testing.T) {
 	t.Run("坏 JSON 回落配置默认", func(t *testing.T) {
 		env := newEnv(t, `{oops`)
 		assert(t, env, "open", []string{"cfg1"}, "off", []string{"cfgu"})
-		if !env.cap.hasMsg("agent: 名单策略解析失败") {
+		if !env.cap.hasMsg("persona: 名单策略解析失败") {
 			t.Error("want 解析失败 warn")
 		}
 	})

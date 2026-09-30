@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 )
 
 // policyKey 是插件级名单策略的 Storage 键。
-const policyKey = "agent:policy"
+const policyKey = "persona:policy"
 
-// scopeGroup / scopePrivate 是 /agent policy|list 的两个作用域。
+// scopeGroup / scopePrivate 是 /persona policy|list 的两个作用域。
 const (
 	scopeGroup   = "group"
 	scopePrivate = "private"
@@ -122,12 +122,12 @@ func (p *Plugin) loadPolicy(ctx context.Context) {
 		return
 	}
 	if err != nil {
-		p.log.Warn("agent: 读取名单策略失败", "err", err)
+		p.log.Warn("persona: 读取名单策略失败", "err", err)
 		return
 	}
 	var v policyValue
 	if err := json.Unmarshal(raw, &v); err != nil {
-		p.log.Warn("agent: 名单策略解析失败", "err", err)
+		p.log.Warn("persona: 名单策略解析失败", "err", err)
 		return
 	}
 
@@ -162,7 +162,7 @@ func (p *Plugin) savePolicy() {
 	if err != nil {
 		return
 	}
-	p.persist("agent: 写入名单策略失败", func(ctx context.Context) error {
+	p.persist("persona: 写入名单策略失败", func(ctx context.Context) error {
 		return p.store.Set(ctx, policyKey, data, 0)
 	})
 }
@@ -251,45 +251,45 @@ func (p *Plugin) delPolicyID(scope, id string) {
 	}
 }
 
-// policyReport 渲染 `/agent policy`：`agent: group=open(0) · private=off(0)`。
+// policyReport 渲染 `/persona policy`：`persona: group=open(0) · private=off(0)`。
 func (p *Plugin) policyReport() string {
 	p.policyMu.RLock()
 	groupMode, groupList, _ := p.policy.forScope(scopeGroup)
 	privateMode, privateList, _ := p.policy.forScope(scopePrivate)
 	p.policyMu.RUnlock()
-	return "agent: group=" + groupMode + "(" + strconv.Itoa(len(groupList)) + ")" +
+	return "persona: group=" + groupMode + "(" + strconv.Itoa(len(groupList)) + ")" +
 		" · private=" + privateMode + "(" + strconv.Itoa(len(privateList)) + ")"
 }
 
-// policyScopeReport 渲染单侧：`agent: group=whitelist(2)`。
+// policyScopeReport 渲染单侧：`persona: group=whitelist(2)`。
 func (p *Plugin) policyScopeReport(scope string) string {
 	p.policyMu.RLock()
 	mode, list, ok := p.policy.forScope(scope)
 	p.policyMu.RUnlock()
 	if !ok {
-		return agentUsage()
+		return personaUsage()
 	}
-	return "agent: " + scope + "=" + mode + "(" + strconv.Itoa(len(list)) + ")"
+	return "persona: " + scope + "=" + mode + "(" + strconv.Itoa(len(list)) + ")"
 }
 
-// listReport 渲染 `/agent list`：`agent: group=[g1 g2] private=[u1]`（空名单为 `[]`）。
+// listReport 渲染 `/persona list`：`persona: group=[g1 g2] private=[u1]`（空名单为 `[]`）。
 func (p *Plugin) listReport() string {
 	p.policyMu.RLock()
 	_, groupList, _ := p.policy.forScope(scopeGroup)
 	_, privateList, _ := p.policy.forScope(scopePrivate)
 	p.policyMu.RUnlock()
-	return "agent: group=" + formatIDList(groupList) + " private=" + formatIDList(privateList)
+	return "persona: group=" + formatIDList(groupList) + " private=" + formatIDList(privateList)
 }
 
-// listScopeReport 渲染单侧：`agent: group=[g1 g2]`。
+// listScopeReport 渲染单侧：`persona: group=[g1 g2]`。
 func (p *Plugin) listScopeReport(scope string) string {
 	p.policyMu.RLock()
 	_, list, ok := p.policy.forScope(scope)
 	p.policyMu.RUnlock()
 	if !ok {
-		return agentUsage()
+		return personaUsage()
 	}
-	return "agent: " + scope + "=" + formatIDList(list)
+	return "persona: " + scope + "=" + formatIDList(list)
 }
 
 // formatIDList 把 ID 列表渲染成 `[id1 id2]`（空名单为 `[]`）。

@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -34,7 +34,7 @@ type channelState struct {
 	peerUserID    string          // 私聊对端用户 ID（kind == private 时非空）
 	history       []Turn
 	replyTimes    []time.Time
-	lastAgentAt   time.Time
+	lastReplyAt   time.Time
 	awaiting      bool
 	firstAt       time.Time
 	lastMsgAt     time.Time
@@ -158,7 +158,7 @@ func (st *channelState) reset() {
 	defer st.mu.Unlock()
 	st.history = st.history[:0]
 	st.replyTimes = nil
-	st.lastAgentAt = time.Time{}
+	st.lastReplyAt = time.Time{}
 	st.awaiting = false
 	st.firstAt = time.Time{}
 	if st.timer != nil {
@@ -293,8 +293,8 @@ func (p *Plugin) evictLocked() {
 		// 有暂存待判消息的状态视同忙：淘汰它等于丢掉这条消息。
 		busy := st.inflight || st.awaiting || st.pending != nil
 		at := st.lastMsgAt
-		if st.lastAgentAt.After(at) {
-			at = st.lastAgentAt
+		if st.lastReplyAt.After(at) {
+			at = st.lastReplyAt
 		}
 		st.mu.Unlock()
 		if !busy {
@@ -315,7 +315,7 @@ func (p *Plugin) evictLocked() {
 
 // overrideKey 返回会话覆盖的 Storage 键。
 func overrideKey(sessionKey string) string {
-	return "agent:override:" + sessionKey
+	return "persona:override:" + sessionKey
 }
 
 // overrideValue 是覆盖值持久化后的 JSON 形状。
@@ -341,11 +341,11 @@ func (p *Plugin) restoreState(st *channelState) {
 			if json.Unmarshal(raw, &v) == nil {
 				persona, disabled, restored = v.Persona, v.Disabled, true
 			} else {
-				p.log.Warn("agent: 覆盖数据解析失败", "channel", st.key)
+				p.log.Warn("persona: 覆盖数据解析失败", "channel", st.key)
 			}
 		case errors.Is(err, bot.ErrNotFound):
 		default:
-			p.log.Warn("agent: 读取覆盖失败", "channel", st.key, "err", err)
+			p.log.Warn("persona: 读取覆盖失败", "channel", st.key, "err", err)
 		}
 	}
 	p.finishLoad(st, persona, disabled, restored)
@@ -365,7 +365,7 @@ func (p *Plugin) finishLoad(st *channelState, persona string, disabled, restored
 	pend := st.pending
 	st.pending = nil
 	if pend != nil && pend.epoch != st.epoch {
-		pend = nil // 期间被 /agent reset 代次作废，暂存消息随之丢弃
+		pend = nil // 期间被 /persona reset 代次作废，暂存消息随之丢弃
 	}
 	st.mu.Unlock()
 
@@ -391,7 +391,7 @@ func (p *Plugin) saveOverride(st *channelState) {
 	if err != nil {
 		return
 	}
-	p.persist("agent: 写入覆盖失败", func(ctx context.Context) error {
+	p.persist("persona: 写入覆盖失败", func(ctx context.Context) error {
 		return p.store.Set(ctx, key, data, 0)
 	}, "channel", key)
 }

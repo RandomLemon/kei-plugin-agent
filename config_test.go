@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"context"
@@ -98,42 +98,42 @@ func TestLoadConfigErrors(t *testing.T) {
 		want   string
 	}{
 		{"default_persona 未定义", func(c map[string]any) { c["default_persona"] = "cat" },
-			"agent: 配置错误 default_persona=cat: 未在 personas 中定义"},
+			"persona: 配置错误 default_persona=cat: 未在 personas 中定义"},
 		{"personas 为空", func(c map[string]any) { c["personas"] = map[string]any{} },
-			"agent: 配置错误 personas=: 必须是非空对象"},
+			"persona: 配置错误 personas=: 必须是非空对象"},
 		{"random_probability 越界", func(c map[string]any) { c["random_probability"] = 1.5 },
-			"agent: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数"},
+			"persona: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数"},
 		{"quiet_hours 格式", func(c map[string]any) { c["random_quiet_hours"] = "23:00" },
-			"agent: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式"},
+			"persona: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式"},
 		{"context_max_messages 越界", func(c map[string]any) { c["context_max_messages"] = 0 },
-			"agent: 配置错误 context_max_messages=0: 必须 >= 1"},
+			"persona: 配置错误 context_max_messages=0: 必须 >= 1"},
 		{"prompt 为空", func(c map[string]any) {
 			c["personas"] = map[string]any{"default": map[string]any{"prompt": ""}}
-		}, "agent: 配置错误 personas.default.prompt=: prompt 不能为空"},
+		}, "persona: 配置错误 personas.default.prompt=: prompt 不能为空"},
 		{"bindings channel_id 为空", func(c map[string]any) {
 			c["bindings"] = []any{map[string]any{"persona": "default"}}
-		}, "agent: 配置错误 bindings.channel_id=: channel_id 不能为空"},
+		}, "persona: 配置错误 bindings.channel_id=: channel_id 不能为空"},
 		{"bindings persona 未定义", func(c map[string]any) {
 			c["bindings"] = []any{map[string]any{"channel_id": "g1", "persona": "nope"}}
-		}, "agent: 配置错误 bindings.persona=nope: 未在 personas 中定义"},
+		}, "persona: 配置错误 bindings.persona=nope: 未在 personas 中定义"},
 		{"时区非法", func(c map[string]any) { c["random_timezone"] = "No/SuchZone" },
-			"agent: 配置错误 random_timezone=No/SuchZone: 不是合法时区"},
+			"persona: 配置错误 random_timezone=No/SuchZone: 不是合法时区"},
 		{"llm_max_tokens 越界", func(c map[string]any) { c["llm_max_tokens"] = 0 },
-			"agent: 配置错误 llm_max_tokens=0: 必须 >= 1"},
+			"persona: 配置错误 llm_max_tokens=0: 必须 >= 1"},
 		{"random_min_participants 越界", func(c map[string]any) { c["random_min_participants"] = 0 },
-			"agent: 配置错误 random_min_participants=0: 必须 >= 1"},
+			"persona: 配置错误 random_min_participants=0: 必须 >= 1"},
 		{"llm_timeout 为负", func(c map[string]any) { c["llm_timeout"] = -1 },
-			"agent: 配置错误 llm_timeout=-1s: 必须 >= 0"},
+			"persona: 配置错误 llm_timeout=-1s: 必须 >= 0"},
 		{"persona temperature 类型错误", func(c map[string]any) {
 			c["personas"] = map[string]any{"default": map[string]any{"prompt": "p", "temperature": "hot"}}
-		}, "agent: 配置错误 personas.default.temperature=hot: 必须 >= 0"},
+		}, "persona: 配置错误 personas.default.temperature=hot: 必须 >= 0"},
 		{"persona max_tokens 类型错误", func(c map[string]any) {
 			c["personas"] = map[string]any{"default": map[string]any{"prompt": "p", "max_tokens": "many"}}
-		}, "agent: 配置错误 personas.default.max_tokens=many: 必须 >= 1"},
+		}, "persona: 配置错误 personas.default.max_tokens=many: 必须 >= 1"},
 		{"group_policy 非法", func(c map[string]any) { c["group_policy"] = "all" },
-			"agent: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一"},
+			"persona: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一"},
 		{"private_policy 非法", func(c map[string]any) { c["private_policy"] = "on" },
-			"agent: 配置错误 private_policy=on: 必须是 off|open|whitelist|blacklist 之一"},
+			"persona: 配置错误 private_policy=on: 必须是 off|open|whitelist|blacklist 之一"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,12 +156,12 @@ func TestLoadConfigErrors(t *testing.T) {
 func TestSetupRequiresNetworkPermission(t *testing.T) {
 	p := &Plugin{}
 	pc := bot.PluginContext{
-		Name:   "agent",
+		Name:   "persona",
 		Config: bot.NewConfig(baseConfigMap("http://x")),
 	}
 	ctx := bot.WithPluginContext(context.Background(), pc)
 	err := p.Setup(ctx, &fakeRegistrar{})
-	if err == nil || err.Error() != "agent: 需要 network 权限" {
+	if err == nil || err.Error() != "persona: 需要 network 权限" {
 		t.Fatalf("err = %v, want 需要 network 权限", err)
 	}
 }

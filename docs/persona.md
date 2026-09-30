@@ -1,6 +1,6 @@
 # persona.md — 人格系统（第 8 章）
 
-本文覆盖第 8 章：人格预设库、绑定与解析优先级、运行时覆盖与 `/agent` 命令、系统提示词模板、历史渲染、回复清洗。配置键名与默认值以 [`configuration.md`](configuration.md) §10.1 为唯一权威；LLM 请求构造见 [`llm.md`](llm.md) §9.1。
+本文覆盖第 8 章：人格预设库、绑定与解析优先级、运行时覆盖与 `/persona` 命令、系统提示词模板、历史渲染、回复清洗。配置键名与默认值以 [`configuration.md`](configuration.md) §10.1 为唯一权威；LLM 请求构造见 [`llm.md`](llm.md) §9.1。
 
 ## 8.1 预设库
 
@@ -34,7 +34,7 @@ personas:
 
 - `default_persona` 默认 `default`。
 - 必须存在 `personas[default_persona]`，否则 `Setup` 返回错误并点名缺失的预设。
-- `bindings[].persona` 与 `/agent persona <name>` 引用的名字必须存在，否则报错（配置阶段）或命令回绝（运行阶段）。
+- `bindings[].persona` 与 `/persona persona <name>` 引用的名字必须存在，否则报错（配置阶段）或命令回绝（运行阶段）。
 - `prompt` 为空的条目视为错误并点名。
 - 校验错误文案见 [`configuration.md`](configuration.md) §10.4。
 
@@ -67,15 +67,15 @@ bindings:
 | 平台 `feishu`、频道 `g1` | 第 1、2 行（第 2 行非空字段更多） | `deadpan` |
 | 平台 `feishu`、bot `feishu-main`、频道 `g2` | 第 1、3 行（第 3 行非空字段更多） | `deadpan` |
 | 平台 `onebot`、频道 `g9` | 无 | `default_persona` |
-| 平台 `onebot`、频道 `g1`，且已 `/agent persona default` | 覆盖优先 | `default` |
+| 平台 `onebot`、频道 `g1`，且已 `/persona persona default` | 覆盖优先 | `default` |
 
-## 8.4 运行时覆盖与 `/agent` 命令
+## 8.4 运行时覆盖与 `/persona` 命令
 
 命令注册（逐字）：
 
 ```go
-reg.OnCommand("agent", p.handleCommand,
-	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("agent:admin"))
+reg.OnCommand("persona", p.handleCommand,
+	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 ```
 
 `WithAdmin()` 需要核心 `auth.admin_users` 配置 + Auth 中间件，按 `Event.Sender.ID` 精确比较（见 [`architecture.md`](architecture.md) 第 6 章）。
@@ -100,34 +100,34 @@ reg.OnCommand("agent", p.handleCommand,
 用法文本（逐字）：
 
 ```text
-用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]
+用法: /persona status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]
 ```
 
 `policy`/`list` 的输出行（逐字，语义与空名单行为见 [`participation.md`](participation.md) §7.8）：
 
 ```text
-/agent policy                      → agent: group=open(0) · private=off(0)
-/agent policy group whitelist       → agent: group=whitelist(0)
-/agent list                         → agent: group=[g1 g2] private=[]
-/agent list group add g9            → agent: group=[g1 g2 g9]
+/persona policy                  → persona: group=open(0) · private=off(0)
+/persona policy group whitelist  → persona: group=whitelist(0)
+/persona list                    → persona: group=[g1 g2] private=[]
+/persona list group add g9       → persona: group=[g1 g2 g9]
 ```
 
 - 这两个子命令同样只走 `bot.WithAdmin()`（仅管理员），不做 LLM 调用、不进历史。
 - 参数非法或缺参回用法文本；`add` 已存在、`del` 不存在均幂等（回同一行，不产生写穿透）。
-- 策略是**插件级**（不是每会话），持久化键 `agent:policy`（[`architecture.md`](architecture.md) §4.4）。
+- 策略是**插件级**（不是每会话），持久化键 `persona:policy`（[`architecture.md`](architecture.md) §4.4）。
 
-**`/agent status` 输出（字段顺序固定，`·` 分隔，逐字）**：
+**`/persona status` 输出（字段顺序固定，`·` 分隔，逐字）**：
 
 ```text
-agent: 开 · persona=tsundere(override) · 历史 18 条 · 近 1 小时回复 3/6 · 上次回复 42s 前 · llm 错误 0 · 已跳 12
+persona: 开 · persona=tsundere(override) · 历史 18 条 · 近 1 小时回复 3/6 · 上次回复 42s 前 · llm 错误 0 · 已跳 12
 ```
 
 字段含义依次为：开关（`开`/`关`）、当前人格与来源（`(override)`/`(binding)`/`(default)`，无覆盖时为 `(binding)` 或 `(default)`）、当前历史条数、近 1 小时回复数/上限（`3/6`）、距上次回复的相对时间（`42s 前`，无回复时写 `从未`）、LLM 错误数、跳过数。
 
-**`/agent persona`（无参数）输出（逐字）**：
+**`/persona persona`（无参数）输出（逐字）**：
 
 ```text
-agent: persona=tsundere 来源=override
+persona: persona=tsundere 来源=override
 ```
 
 `来源=` 取值固定为 `override`/`binding`/`default`。

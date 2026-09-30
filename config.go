@@ -1,4 +1,4 @@
-package agent
+package persona
 
 import (
 	"encoding/json"
@@ -57,7 +57,7 @@ type bindingConfig struct {
 	Persona   string
 }
 
-// config 是 agent 的全部配置（键名与默认值见 docs/configuration.md §10.1）。
+// config 是 persona 的全部配置（键名与默认值见 docs/configuration.md §10.1）。
 type config struct {
 	personas          map[string]personaConfig
 	defaultPersona    string
@@ -113,7 +113,7 @@ type config struct {
 
 // loadConfig 读取全部键、填默认值并校验。
 //
-// 校验失败返回形如 "agent: 配置错误 <key>=<值>: <原因>" 的错误。
+// 校验失败返回形如 "persona: 配置错误 <key>=<值>: <原因>" 的错误。
 func loadConfig(c *bot.Config) (*config, error) {
 	r := cfgReader{c: c}
 	cfg := &config{}
@@ -531,7 +531,7 @@ func strOf(v any) string {
 
 // cfgErr 构造统一格式的配置错误。
 func cfgErr(key, value, reason string) error {
-	return fmt.Errorf("agent: 配置错误 %s=%s: %s", key, value, reason)
+	return fmt.Errorf("persona: 配置错误 %s=%s: %s", key, value, reason)
 }
 
 func formatFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
