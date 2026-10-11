@@ -58,6 +58,7 @@ type Plugin struct {
 	now       func() time.Time
 	randFloat func() float64
 	completer completer
+	tools     []tool // 按 tools_enabled 装配的工具（tools.md §13.3）
 
 	statSkips     atomic.Int64
 	statLLMErrors atomic.Int64
@@ -104,6 +105,7 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	p.sem = newSemaphore(cfg.limitsMaxConcurrent)
 	p.replyIDs = newIDRing(replyIDRingSize)
 	p.completer = newOpenAIClient(cfg, pc.HTTPClient, log)
+	p.tools = buildTools(cfg, pc.HTTPClient, log)
 
 	reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
 		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("persona:group"))

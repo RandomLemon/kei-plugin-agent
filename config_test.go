@@ -56,6 +56,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 		{"llm_vision_enabled", cfg.llmVisionEnabled, false},
 		{"llm_vision_max_images", cfg.llmVisionMaxImages, 4},
 		{"llm_vision_max_image_bytes", cfg.llmVisionMaxImageBytes, 4194304},
+		{"tools_max_rounds", cfg.toolsMaxRounds, 2},
+		{"tools_call_timeout", cfg.toolsCallTimeout, 8 * time.Second},
+		{"tools_result_max_chars", cfg.toolsResultMaxChars, 2000},
+		{"rag_top_k", cfg.ragTopK, 3},
+		{"rag_context_max_chars", cfg.ragContextMaxChars, 600},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -68,6 +73,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	pf := cfg.personas["default"]
 	if pf.DisplayName != "default" || pf.Temperature != 0.8 || pf.MaxTokens != 200 || pf.SkipToken != "[SKIP]" {
 		t.Errorf("人格默认回落错误: %+v", pf)
+	}
+	if len(cfg.toolsEnabled) != 0 || pf.hasTools {
+		t.Errorf("工具默认应不启用: tools_enabled=%v persona=%+v", cfg.toolsEnabled, pf)
 	}
 	if len(cfg.groupList) != 0 || len(cfg.privateList) != 0 {
 		t.Errorf("名单默认应为空: group=%v private=%v", cfg.groupList, cfg.privateList)
@@ -186,6 +194,31 @@ func TestLoadConfigErrors(t *testing.T) {
 			"persona: 配置错误 llm_vision_max_images=-1: 必须 >= 0"},
 		{"llm_vision_max_image_bytes 为零", func(c map[string]any) { c["llm_vision_max_image_bytes"] = 0 },
 			"persona: 配置错误 llm_vision_max_image_bytes=0: 必须 >= 1"},
+		{"tools_enabled 未知工具", func(c map[string]any) { c["tools_enabled"] = []any{"weather"} },
+			"persona: 配置错误 tools_enabled=weather: 不是已知工具"},
+		{"人格 tools 未启用", func(c map[string]any) {
+			c["personas"] = map[string]any{"default": map[string]any{"prompt": "p", "tools": []any{"knowledge_search"}}}
+		}, "persona: 配置错误 personas.default.tools=knowledge_search: 未在 tools_enabled 中启用"},
+		{"tools_max_rounds 为零", func(c map[string]any) { c["tools_max_rounds"] = 0 },
+			"persona: 配置错误 tools_max_rounds=0: 必须 >= 1"},
+		{"tools_result_max_chars 为零", func(c map[string]any) { c["tools_result_max_chars"] = 0 },
+			"persona: 配置错误 tools_result_max_chars=0: 必须 >= 1"},
+		{"tools_call_timeout 为负", func(c map[string]any) { c["tools_call_timeout"] = -1 },
+			"persona: 配置错误 tools_call_timeout=-1s: 必须 >= 0"},
+		{"rag_base_url 为空", func(c map[string]any) {
+			c["tools_enabled"] = []any{"knowledge_search"}
+			c["rag_api_token"] = "t"
+		}, "persona: 配置错误 rag_base_url=: 不能为空"},
+		{"rag_api_token 为空", func(c map[string]any) {
+			c["tools_enabled"] = []any{"knowledge_search"}
+			c["rag_base_url"] = "http://rag.test/api/v1"
+		}, "persona: 配置错误 rag_api_token=: 不能为空"},
+		{"rag_top_k 为零", func(c map[string]any) { c["rag_top_k"] = 0 },
+			"persona: 配置错误 rag_top_k=0: 必须 >= 1"},
+		{"rag_top_k 超上限", func(c map[string]any) { c["rag_top_k"] = 21 },
+			"persona: 配置错误 rag_top_k=21: 必须 <= 20"},
+		{"rag_context_max_chars 为零", func(c map[string]any) { c["rag_context_max_chars"] = 0 },
+			"persona: 配置错误 rag_context_max_chars=0: 必须 >= 1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,6 +235,40 @@ func TestLoadConfigErrors(t *testing.T) {
 				t.Fatalf("错误 = %q, want %q", gotErr, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadConfigTools(t *testing.T) {
+	cfg, err := loadConfig(bot.NewConfig(map[string]any{
+		"personas": map[string]any{
+			"inherit": "p",
+			"null":    map[string]any{"prompt": "p", "tools": nil},
+			"quiet":   map[string]any{"prompt": "p", "tools": []any{}},
+			"picked":  map[string]any{"prompt": "p", "tools": "knowledge_search"},
+		},
+		"default_persona": "inherit",
+		"llm_model":       "m",
+		"tools_enabled":   []any{"knowledge_search", "knowledge_search"},
+		"rag_base_url":    "http://rag.test/api/v1",
+		"rag_api_token":   "t",
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.toolsEnabled, []string{"knowledge_search"}) {
+		t.Fatalf("tools_enabled 应去重: %v", cfg.toolsEnabled)
+	}
+	if pf := cfg.personas["inherit"]; pf.hasTools {
+		t.Fatalf("字符串人格应继承: %+v", pf)
+	}
+	if pf := cfg.personas["null"]; pf.hasTools {
+		t.Fatalf("tools 为 null 应继承: %+v", pf)
+	}
+	if pf := cfg.personas["quiet"]; !pf.hasTools || len(pf.Tools) != 0 {
+		t.Fatalf("tools: [] 应为不使用工具: %+v", pf)
+	}
+	if pf := cfg.personas["picked"]; !pf.hasTools || !reflect.DeepEqual(pf.Tools, []string{"knowledge_search"}) {
+		t.Fatalf("名单应按 readStringList 口径解析: %+v", pf)
 	}
 }
 

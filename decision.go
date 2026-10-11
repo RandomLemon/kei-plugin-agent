@@ -2,6 +2,7 @@ package persona
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -348,18 +349,22 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
 	}
-	completion, err := p.completer.Complete(p.ctx, req)
+	content, err := p.completeWithTools(st, epoch, personaName, req)
+	if p.ctx.Err() != nil {
+		return
+	}
+	if errors.Is(err, errStale) {
+		_ = p.skipLog(st.key, "stale", sender)
+		return
+	}
 	if err != nil {
 		p.bumpLLMError(st)
 		p.log.Warn("persona: LLM 调用失败", "channel", st.key, "err", err)
 		_ = p.skipLog(st.key, "llm_error", sender)
 		return
 	}
-	if p.ctx.Err() != nil {
-		return
-	}
 
-	reply, reason := p.cleanReply(completion.Content, pf.SkipToken, st)
+	reply, reason := p.cleanReply(content, pf.SkipToken, st)
 	if reason != "" {
 		p.bumpSkip(st)
 		_ = p.skipLog(st.key, reason, sender)

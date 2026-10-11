@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,9 +45,11 @@ type personaConfig struct {
 	Temperature float64
 	MaxTokens   int
 	SkipToken   string
+	Tools       []string // 该人格可用的工具名；hasTools 为假时继承 tools_enabled
 
 	hasTemperature bool
 	hasMaxTokens   bool
+	hasTools       bool
 }
 
 // bindingConfig 是一条每会话人格绑定。
@@ -107,6 +110,15 @@ type config struct {
 	llmVisionMaxImageBytes  int
 	llmVisionAllowedFormats map[string]bool // nil 表示不过滤任何格式
 
+	toolsEnabled        []string // 已去重，保持配置顺序
+	toolsMaxRounds      int
+	toolsCallTimeout    time.Duration
+	toolsResultMaxChars int
+	ragBaseURL          string
+	ragAPIToken         string
+	ragTopK             int
+	ragContextMaxChars  int
+
 	replyMaxChars      int
 	replyMentionSender bool
 	replyDedupe        bool
@@ -152,6 +164,10 @@ func loadConfig(c *bot.Config) (*config, error) {
 	}
 	cfg.llmVisionAllowedFormats = formatSet(readStringList(c, "llm_vision_allowed_formats"))
 
+	// tools_enabled 先读：人格的 tools 名单需要对照它校验。
+	if cfg.toolsEnabled, err = readToolsEnabled(c); err != nil {
+		return nil, err
+	}
 	if cfg.personas, err = readPersonas(c, cfg); err != nil {
 		return nil, err
 	}
@@ -175,6 +191,9 @@ func loadConfig(c *bot.Config) (*config, error) {
 	cfg.replyMentionSender = r.boolean("reply_mention_sender", false)
 	cfg.replyDedupe = r.boolean("reply_dedupe", true)
 	cfg.debugPrompts = r.boolean("debug_prompts", false)
+	cfg.toolsCallTimeout = r.dur("tools_call_timeout", 8*time.Second)
+	cfg.ragBaseURL = r.str("rag_base_url", "")
+	cfg.ragAPIToken = r.str("rag_api_token", "")
 
 	cfg.groupPolicy = r.str("group_policy", policyOpen)
 	cfg.groupList = readStringList(c, "group_list")
@@ -206,6 +225,18 @@ func loadConfig(c *bot.Config) (*config, error) {
 		return nil, err
 	}
 	if cfg.limitsMaxConcurrent, err = r.intKey("limits_max_concurrent", 2, "必须 >= 1"); err != nil {
+		return nil, err
+	}
+	if cfg.toolsMaxRounds, err = r.intKey("tools_max_rounds", 2, "必须 >= 1"); err != nil {
+		return nil, err
+	}
+	if cfg.toolsResultMaxChars, err = r.intKey("tools_result_max_chars", 2000, "必须 >= 1"); err != nil {
+		return nil, err
+	}
+	if cfg.ragTopK, err = r.intKey("rag_top_k", 3, "必须 >= 1"); err != nil {
+		return nil, err
+	}
+	if cfg.ragContextMaxChars, err = r.intKey("rag_context_max_chars", 600, "必须 >= 1"); err != nil {
 		return nil, err
 	}
 
@@ -278,6 +309,30 @@ func loadConfig(c *bot.Config) (*config, error) {
 	if err := needMinFloat("llm_temperature", cfg.llmTemperature, 0); err != nil {
 		return nil, err
 	}
+	if err := needMinInt("tools_max_rounds", cfg.toolsMaxRounds, 1); err != nil {
+		return nil, err
+	}
+	if err := needMinInt("tools_result_max_chars", cfg.toolsResultMaxChars, 1); err != nil {
+		return nil, err
+	}
+	if err := needMinInt("rag_top_k", cfg.ragTopK, 1); err != nil {
+		return nil, err
+	}
+	if cfg.ragTopK > ragMaxTopK {
+		return nil, cfgErr("rag_top_k", strconv.Itoa(cfg.ragTopK), fmt.Sprintf("必须 <= %d", ragMaxTopK))
+	}
+	if err := needMinInt("rag_context_max_chars", cfg.ragContextMaxChars, 1); err != nil {
+		return nil, err
+	}
+	// knowledge_search 的必填项只在它被启用时校验。
+	if slices.Contains(cfg.toolsEnabled, ragToolName) {
+		if cfg.ragBaseURL == "" {
+			return nil, cfgErr("rag_base_url", "", "不能为空")
+		}
+		if cfg.ragAPIToken == "" {
+			return nil, cfgErr("rag_api_token", "", "不能为空")
+		}
+	}
 	for _, d := range []struct {
 		key string
 		val time.Duration
@@ -288,6 +343,7 @@ func loadConfig(c *bot.Config) (*config, error) {
 		{"batch_window", cfg.batchWindow},
 		{"batch_max_window", cfg.batchMaxWindow},
 		{"llm_timeout", cfg.llmTimeout},
+		{"tools_call_timeout", cfg.toolsCallTimeout},
 	} {
 		if err := needMinDur(d.key, d.val); err != nil {
 			return nil, err
@@ -345,6 +401,14 @@ func readPersonas(c *bot.Config, cfg *config) (map[string]personaConfig, error) 
 			if s, ok := t["skip_token"].(string); ok && s != "" {
 				p.SkipToken = s
 			}
+			if rawTools, ok := t["tools"]; ok && rawTools != nil { // 写成 null 与不写一样：继承
+				p.Tools, p.hasTools = stringList(rawTools), true
+				for _, toolName := range p.Tools {
+					if !slices.Contains(cfg.toolsEnabled, toolName) {
+						return nil, cfgErr("personas."+name+".tools", toolName, "未在 tools_enabled 中启用")
+					}
+				}
+			}
 		default:
 			return nil, cfgErr("personas", "", "必须是非空对象")
 		}
@@ -364,6 +428,20 @@ func readPersonas(c *bot.Config, cfg *config) (map[string]personaConfig, error) 
 			p.DisplayName = name
 		}
 		out[name] = p
+	}
+	return out, nil
+}
+
+// readToolsEnabled 解析 tools_enabled：名字必须在 builtinTools() 中登记，重复的只保留一次。
+func readToolsEnabled(c *bot.Config) ([]string, error) {
+	var out []string
+	for _, name := range readStringList(c, "tools_enabled") {
+		if _, ok := findToolSpec(name); !ok {
+			return nil, cfgErr("tools_enabled", name, "不是已知工具")
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
 	}
 	return out, nil
 }
@@ -427,7 +505,15 @@ func readHeaders(c *bot.Config) map[string]string {
 // 所有空串一律丢弃；键缺失或无法识别时返回 nil（调用方按「未配置」处理）。
 func readStringList(c *bot.Config, key string) []string {
 	raw, ok := c.Get(key)
-	if !ok || raw == nil {
+	if !ok {
+		return nil
+	}
+	return stringList(raw)
+}
+
+// stringList 把配置原始值转成字符串列表（规则见 readStringList）；nil 返回 nil。
+func stringList(raw any) []string {
+	if raw == nil {
 		return nil
 	}
 	switch t := raw.(type) {
