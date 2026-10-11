@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,8 +49,8 @@ func TestOpenAIClientSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if got != "打球可以啊" {
-		t.Fatalf("content = %q", got)
+	if got.Content != "打球可以啊" {
+		t.Fatalf("content = %q", got.Content)
 	}
 	if gotModel != "m" || gotAuth != "Bearer k" {
 		t.Fatalf("model=%q auth=%q", gotModel, gotAuth)
@@ -208,8 +209,8 @@ func TestOpenAIClientRetries(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
-			if got != "ok" || calls.Load() != 2 {
-				t.Fatalf("got=%q calls=%d", got, calls.Load())
+			if got.Content != "ok" || calls.Load() != 2 {
+				t.Fatalf("got=%q calls=%d", got.Content, calls.Load())
 			}
 		})
 	}
@@ -241,6 +242,7 @@ func TestOpenAIClientBadResponses(t *testing.T) {
 		{"缺 choices", `{"id":"x"}`},
 		{"content 非字符串", `{"choices":[{"message":{"content":123}}]}`},
 		{"content 缺失", `{"choices":[{"message":{}}]}`},
+		{"content 为 null 且无 tool_calls", `{"choices":[{"message":{"content":null}}]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -305,8 +307,8 @@ func TestOpenAIClientDebugLogsRequestAndResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if got != "打球可以啊" {
-		t.Fatalf("content = %q", got)
+	if got.Content != "打球可以啊" {
+		t.Fatalf("content = %q", got.Content)
 	}
 	reqBody := cap.attrOf("persona llm 请求", "body")
 	if !strings.Contains(reqBody, `"content":[{"type":"text","text":"u"}]`) || !strings.Contains(reqBody, `"max_tokens":10`) {
@@ -359,6 +361,99 @@ func TestOpenAIClientDebugLogsErrorResponseBody(t *testing.T) {
 			}
 			if got := cap.attrOf("persona llm 响应", "body"); got != tc.body {
 				t.Fatalf("响应日志 body = %q", got)
+			}
+		})
+	}
+}
+
+func TestParseCompletionToolCalls(t *testing.T) {
+	const calls = `"tool_calls":[{"id":"call_1","type":"function","function":{"name":"knowledge_search","arguments":"{\"query\":\"q\"}"}}]`
+	cases := []struct {
+		name        string
+		body        string
+		wantContent string
+	}{
+		{"content 为 null", `{"choices":[{"message":{"content":null,` + calls + `}}]}`, ""},
+		{"content 缺失", `{"choices":[{"message":{` + calls + `}}]}`, ""},
+		{"content 为字符串", `{"choices":[{"message":{"content":"查一下",` + calls + `}}]}`, "查一下"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := parseCompletion([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("parseCompletion: %v", err)
+			}
+			if res.Content != tc.wantContent {
+				t.Fatalf("Content = %q, want %q", res.Content, tc.wantContent)
+			}
+			want := []toolCall{{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "knowledge_search", Arguments: `{"query":"q"}`}}}
+			if !reflect.DeepEqual(res.ToolCalls, want) {
+				t.Fatalf("ToolCalls = %+v", res.ToolCalls)
+			}
+		})
+	}
+}
+
+func TestOpenAIClientToolsPayload(t *testing.T) {
+	text := "先查一下"
+	result := "[知识库检索结果] 没有找到相关资料。"
+	call := toolCall{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "knowledge_search", Arguments: `{"query":"q"}`}}
+	withTools := completionRequest{
+		System: "s",
+		User:   textParts("u"),
+		Followups: []chatMessage{
+			{Role: "assistant", Content: &text, ToolCalls: []toolCall{call}},
+			{Role: "tool", Content: &result, ToolCallID: "call_1"},
+		},
+		Tools: []toolDef{{Type: "function", Function: toolFunction{Name: "knowledge_search", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+	}
+	withNone := withTools
+	withNone.ToolChoice = "none"
+
+	cases := []struct {
+		name         string
+		req          completionRequest
+		wantMessages int
+		wantTools    bool
+		wantChoice   any
+	}{
+		{"无工具", completionRequest{System: "s", User: textParts("u")}, 2, false, nil},
+		{"有工具", withTools, 4, true, nil},
+		{"轮数用尽", withNone, 4, true, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+					t.Errorf("decode: %v", err)
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			}))
+			defer srv.Close()
+			c := testClient(t, srv.URL, 0, 2*time.Second, nil)
+			if _, err := c.Complete(context.Background(), tc.req); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			msgs, _ := got["messages"].([]any)
+			if len(msgs) != tc.wantMessages {
+				t.Fatalf("messages = %#v", got["messages"])
+			}
+			if _, ok := got["tools"]; ok != tc.wantTools {
+				t.Fatalf("tools 存在 = %v, want %v", ok, tc.wantTools)
+			}
+			if got["tool_choice"] != tc.wantChoice {
+				t.Fatalf("tool_choice = %#v, want %#v", got["tool_choice"], tc.wantChoice)
+			}
+			if tc.wantMessages == 4 {
+				assistant, _ := msgs[2].(map[string]any)
+				tool, _ := msgs[3].(map[string]any)
+				if assistant["role"] != "assistant" || assistant["content"] != text || assistant["tool_calls"] == nil {
+					t.Fatalf("assistant 消息 = %#v", assistant)
+				}
+				if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" || tool["content"] != result {
+					t.Fatalf("tool 消息 = %#v", tool)
+				}
 			}
 		})
 	}

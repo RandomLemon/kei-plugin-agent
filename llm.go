@@ -17,9 +17,52 @@ import (
 // completionRequest 是一次补全请求；System/User 分别对应 system 与 user 消息。
 type completionRequest struct {
 	System      string
-	User        contentParts // user 消息的 content 数组（text + 可选 image_url）
+	User        contentParts  // user 消息的 content 数组（text + 可选 image_url）
+	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（tools.md §13.4）
+	Tools       []toolDef     // 为空时请求体不带 tools 字段
+	ToolChoice  string        // 为空时不发 tool_choice；轮数用尽时为 "none"
 	Temperature float64
 	MaxTokens   int
+}
+
+// completionResult 是一次补全的结果：最终文本或工具调用。
+type completionResult struct {
+	Content   string     // choices[0].message.content；为 null 或缺失时为空串
+	ToolCalls []toolCall // choices[0].message.tool_calls
+}
+
+// chatMessage 是工具轮追加的一条消息。
+type chatMessage struct {
+	Role       string     `json:"role"`                   // "assistant" 或 "tool"
+	Content    *string    `json:"content"`                // assistant 无文本时为 null
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`   // 仅 assistant
+	ToolCallID string     `json:"tool_call_id,omitempty"` // 仅 tool
+}
+
+// toolCall 是模型发起的一次工具调用。
+type toolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // 恒为 "function"
+	Function toolCallFunction `json:"function"`
+}
+
+// toolCallFunction 是工具调用的函数名与参数。
+type toolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串，原样交给工具解析
+}
+
+// toolDef 是 tools[] 中的一个工具定义。
+type toolDef struct {
+	Type     string       `json:"type"` // 恒为 "function"
+	Function toolFunction `json:"function"`
+}
+
+// toolFunction 是工具定义的函数描述。
+type toolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
 }
 
 // contentPart 是 OpenAI content 数组中的一个块：text 或 image_url。
@@ -42,7 +85,7 @@ func textParts(s string) contentParts { return contentParts{{Type: "text", Text:
 
 // completer 屏蔽具体 LLM 服务，便于单测注入桩。
 type completer interface {
-	Complete(ctx context.Context, req completionRequest) (string, error)
+	Complete(ctx context.Context, req completionRequest) (completionResult, error)
 }
 
 type openaiClient struct { // 实现 completer
@@ -76,7 +119,7 @@ func newOpenAIClient(cfg *config, hc *http.Client, log *slog.Logger) *openaiClie
 }
 
 // Complete 调用 chat completions；仅对 429/5xx/网络错误重试。
-func (c *openaiClient) Complete(ctx context.Context, req completionRequest) (string, error) {
+func (c *openaiClient) Complete(ctx context.Context, req completionRequest) (completionResult, error) {
 	attempts := c.retries + 1
 	var lastErr error
 	for attempt := range attempts {
@@ -84,31 +127,31 @@ func (c *openaiClient) Complete(ctx context.Context, req completionRequest) (str
 			backoff := 500 * time.Millisecond << (attempt - 1)
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return completionResult{}, ctx.Err()
 			case <-time.After(backoff):
 			}
 		}
-		content, retryable, err := c.attempt(ctx, req)
+		res, retryable, err := c.attempt(ctx, req)
 		if err == nil {
-			return content, nil
+			return res, nil
 		}
 		lastErr = err
 		if !retryable {
-			return "", err
+			return completionResult{}, err
 		}
 	}
-	return "", lastErr
+	return completionResult{}, lastErr
 }
 
 // attempt 执行单次请求；返回是否可重试。
-func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (string, bool, error) {
+func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (completionResult, bool, error) {
 	actx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
 	payload := c.payload(req, false)
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", false, fmt.Errorf("persona: 请求编码失败: %w", err)
+		return completionResult{}, false, fmt.Errorf("persona: 请求编码失败: %w", err)
 	}
 	if c.debug {
 		redacted, rerr := json.Marshal(c.payload(req, true))
@@ -121,7 +164,7 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	endpoint := trimRightSlash(c.baseURL) + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(actx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", false, fmt.Errorf("persona: 构造请求失败: %w", err)
+		return completionResult{}, false, fmt.Errorf("persona: 构造请求失败: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
@@ -135,48 +178,60 @@ func (c *openaiClient) attempt(ctx context.Context, req completionRequest) (stri
 	if err != nil {
 		// 网络错误可重试；ctx 取消直接失败。
 		if ctx.Err() != nil {
-			return "", false, err
+			return completionResult{}, false, err
 		}
-		return "", true, fmt.Errorf("persona: llm 请求失败: %w", err)
+		return completionResult{}, true, fmt.Errorf("persona: llm 请求失败: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", true, fmt.Errorf("persona: 读取响应失败: %w", err)
+		return completionResult{}, true, fmt.Errorf("persona: 读取响应失败: %w", err)
 	}
 	if c.debug {
 		c.log.Debug("persona llm 响应", "host", hostOf(c.baseURL), "model", c.model, "status", resp.StatusCode, "body", truncateRunes(string(data), 2048))
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return "", true, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
+		return completionResult{}, true, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
 	if resp.StatusCode >= 400 {
-		return "", false, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
+		return completionResult{}, false, fmt.Errorf("persona: llm http %d: %s", resp.StatusCode, snippet(data))
 	}
-	content, err := parseCompletion(data)
+	res, err := parseCompletion(data)
 	if err != nil {
-		return "", false, err
+		return completionResult{}, false, err
 	}
-	return content, false, nil
+	return res, false, nil
 }
 
 // payload 构造请求体；redact 为真时把 image_url 的 data URL 折成
 // "data:<mime>;base64,<N bytes>"，仅用于 debug 日志（线上请求体从不折叠）。
+// 工具轮消息按序追加在 user 之后；tools 与 tool_choice 只在非空时出现。
 func (c *openaiClient) payload(req completionRequest, redact bool) map[string]any {
 	user := req.User
 	if redact {
 		user = redactedParts(req.User)
 	}
-	return map[string]any{
+	messages := []any{
+		map[string]any{"role": "system", "content": req.System},
+		map[string]any{"role": "user", "content": user},
+	}
+	for _, m := range req.Followups {
+		messages = append(messages, m)
+	}
+	body := map[string]any{
 		"model":       c.model,
 		"temperature": req.Temperature,
 		"max_tokens":  req.MaxTokens,
-		"messages": []map[string]any{
-			{"role": "system", "content": req.System},
-			{"role": "user", "content": user},
-		},
+		"messages":    messages,
 	}
+	if len(req.Tools) > 0 {
+		body["tools"] = req.Tools
+	}
+	if req.ToolChoice != "" {
+		body["tool_choice"] = req.ToolChoice
+	}
+	return body
 }
 
 // redactedParts 复制 content 块，把 data URL 折叠为占位符，其余块原样引用。
@@ -204,26 +259,34 @@ func shortenDataURL(u string) string {
 	return fmt.Sprintf("%s;base64,%d bytes", u[:i], n)
 }
 
-// parseCompletion 解析 choices[0].message.content。
-func parseCompletion(data []byte) (string, error) {
+// parseCompletion 解析 choices[0].message 的 content 与 tool_calls（llm.md §9.2）。
+func parseCompletion(data []byte) (completionResult, error) {
 	var resp struct {
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content   json.RawMessage `json:"content"`
+				ToolCalls []toolCall      `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("persona: llm 响应解析失败: %w", err)
+		return completionResult{}, fmt.Errorf("persona: llm 响应解析失败: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("persona: llm 响应缺少 choices")
+		return completionResult{}, fmt.Errorf("persona: llm 响应缺少 choices")
 	}
-	var content string
-	if err := json.Unmarshal(resp.Choices[0].Message.Content, &content); err != nil {
-		return "", fmt.Errorf("persona: llm 响应的 content 不是字符串（可能只返回 reasoning_content）")
+	msg := resp.Choices[0].Message
+	res := completionResult{ToolCalls: msg.ToolCalls}
+	if len(msg.Content) == 0 || string(msg.Content) == "null" {
+		if len(res.ToolCalls) == 0 {
+			return completionResult{}, fmt.Errorf("persona: llm 响应缺少 content（可能只返回 reasoning_content）")
+		}
+		return res, nil
 	}
-	return content, nil
+	if err := json.Unmarshal(msg.Content, &res.Content); err != nil {
+		return completionResult{}, fmt.Errorf("persona: llm 响应的 content 不是字符串")
+	}
+	return res, nil
 }
 
 // snippet 截断响应体片段用于日志。

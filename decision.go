@@ -348,7 +348,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
 	}
-	content, err := p.completer.Complete(p.ctx, req)
+	completion, err := p.completer.Complete(p.ctx, req)
 	if err != nil {
 		p.bumpLLMError(st)
 		p.log.Warn("persona: LLM 调用失败", "channel", st.key, "err", err)
@@ -359,7 +359,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 		return
 	}
 
-	reply, reason := p.cleanReply(content, pf.SkipToken, st)
+	reply, reason := p.cleanReply(completion.Content, pf.SkipToken, st)
 	if reason != "" {
 		p.bumpSkip(st)
 		_ = p.skipLog(st.key, reason, sender)
