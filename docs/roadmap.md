@@ -4,17 +4,15 @@
 
 ## 12.1 现状
 
-**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`rag.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`rag_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
-
-**例外**：第 13 章「工具调用与知识库检索」（[`tools.md`](tools.md)）及其在第 9-11 章引起的同步改动**只有文档、代码未实现**，见 §12.2 P7。
 
 质量门与开发环境见 [`testing.md`](testing.md) §11.1。
 
 ## 12.2 实现阶段
 
-P1-P6 均已实现，保留作为实现顺序记录；P7 尚未实现。每阶段都满足「可独立编译通过 + 测试全绿」。
+以下阶段均已实现，保留作为实现顺序记录；每阶段都满足「可独立编译通过 + 测试全绿」。
 
 ### P1 骨架
 
@@ -56,7 +54,7 @@ P1-P6 均已实现，保留作为实现顺序记录；P7 尚未实现。每阶�
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
 - 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `persona:policy`，`Start` 同步恢复。
 
-### P7 工具调用与知识库检索（未实现）
+### P7 工具调用与知识库检索
 
 - `llm.go`：`completionRequest` 增加 `Followups`/`Tools`/`ToolChoice`，`completer.Complete` 改返回 `completionResult`，解析 `tool_calls`（[`llm.md`](llm.md) §9.1-9.2）；迁移全部调用点与测试桩。
 - `tools.go`：`tool` 接口、`builtinTools()` 内置工具表、`toolsFor` 按人格过滤、`completeWithTools`/`runTool` 循环与兜底；`generate` 改调用它（[`tools.md`](tools.md) §13.2-13.4、[`participation.md`](participation.md) §7.6）。

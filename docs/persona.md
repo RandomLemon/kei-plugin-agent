@@ -34,7 +34,7 @@ personas:
     tools: []
 ```
 
-字符串形态的条目等价于不写 `tools`（继承）。
+字符串形态的条目、以及 `tools` 写成 null（如 YAML 的 `tools:` 不带值），都等价于不写 `tools`（继承）。
 
 ## 8.2 命名与校验
 
