@@ -16,6 +16,7 @@
 | `temperature` | float | `llm_temperature` | 该人格的采样温度覆盖 |
 | `max_tokens` | int | `llm_max_tokens` | 该人格的最大生成 token 覆盖 |
 | `skip_token` | string | `llm_skip_token` | 该人格的 skip 哨兵覆盖 |
+| `tools` | []string | 不写 = 继承 `tools_enabled` | 该人格可用的工具名：不写继承全部已启用工具，`[]` 表示不使用工具，名单内的名字必须出现在 `tools_enabled` 中（[`tools.md`](tools.md) §13.3） |
 
 示例：
 
@@ -28,7 +29,12 @@ personas:
     display_name: 小傲娇
     temperature: 0.9
   deadpan: 冷淡、话少，常用短句。
+  quiet:
+    prompt: 只闲聊，不查资料。
+    tools: []
 ```
+
+字符串形态的条目等价于不写 `tools`（继承）。
 
 ## 8.2 命名与校验
 

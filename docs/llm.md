@@ -20,6 +20,19 @@
                                        {"type":"text","text":"小傲娇: 打球可以啊"}]}]}
 ```
 
+当前人格有可用工具（`tools_enabled` 与人格 `tools`，见 [`tools.md`](tools.md) §13.3）时，请求体追加 `tools`（工具定义数组），工具轮产生的消息按序追加在 `user` 之后；轮数用尽的最后一次请求另带 `"tool_choice":"none"`，其余请求不发 `tool_choice`：
+
+```json
+{"model":"<llm_model>","temperature":0.8,"max_tokens":200,
+ "tools":[{"type":"function","function":{"name":"knowledge_search","description":"...","parameters":{...}}}],
+ "messages":[{"role":"system","content":"<系统提示词>"},
+             {"role":"user","content":[...]},
+             {"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"knowledge_search","arguments":"{\"query\":\"Windows 10 安装\"}"}}]},
+             {"role":"tool","tool_call_id":"call_1","content":"[知识库检索结果]\n..."}]}
+```
+
+没有可用工具时请求体与上例（无 `tools`、只有 system + user 两条消息）完全一致。
+
 - `temperature`/`max_tokens` 取**当前人格**的覆盖值，缺失则回落全局键 `llm_temperature`/`llm_max_tokens`。
 - `system` 的 `content` 恒为**字符串**，是 `persona_template` 渲染结果，包含 11 个占位符（`{{persona}}`、`{{persona_name}}`、`{{chat_kind}}`、`{{channel_name}}`、`{{channel_id}}`、`{{platform}}`、`{{bot_name}}`、`{{now}}`、`{{last_sender}}`、`{{max_chars}}`、`{{skip_token}}`），模板全文与取值见 [`persona.md`](persona.md) §8.5（本文不重复）。
 - `user` 的 `content` 恒为**数组**：首块是历史头（群聊 `[群聊记录]`、私聊 `[私聊记录]`），其后按时间序**每条历史产出自己的块**——文本合并成一个 `text` 块（该条首个 `text` 块带 `<显示名>: ` 前缀），图片在它原本的消息位置产出一个 `{"type":"image_url","image_url":{"url":"..."}}` 块（块形状与示例见 [`persona.md`](persona.md) §8.6）。
@@ -32,9 +45,52 @@
 // completionRequest 是一次补全请求；System/User 分别对应 system 与 user 消息。
 type completionRequest struct {
 	System      string
-	User        contentParts // user 消息的 content 数组（text + 可选 image_url）
+	User        contentParts  // user 消息的 content 数组（text + 可选 image_url）
+	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（tools.md §13.4）
+	Tools       []toolDef     // 为空时请求体不带 tools 字段
+	ToolChoice  string        // 为空时不发 tool_choice；轮数用尽时为 "none"
 	Temperature float64
 	MaxTokens   int
+}
+
+// completionResult 是一次补全的结果：最终文本或工具调用。
+type completionResult struct {
+	Content   string     // choices[0].message.content；为 null 或缺失时为空串
+	ToolCalls []toolCall // choices[0].message.tool_calls
+}
+
+// chatMessage 是工具轮追加的一条消息。
+type chatMessage struct {
+	Role       string     `json:"role"`                   // "assistant" 或 "tool"
+	Content    *string    `json:"content"`                // assistant 无文本时为 null
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`   // 仅 assistant
+	ToolCallID string     `json:"tool_call_id,omitempty"` // 仅 tool
+}
+
+// toolCall 是模型发起的一次工具调用。
+type toolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // 恒为 "function"
+	Function toolCallFunction `json:"function"`
+}
+
+// toolCallFunction 是工具调用的函数名与参数。
+type toolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串，原样交给工具解析
+}
+
+// toolDef 是 tools[] 中的一个工具定义。
+type toolDef struct {
+	Type     string       `json:"type"` // 恒为 "function"
+	Function toolFunction `json:"function"`
+}
+
+// toolFunction 是工具定义的函数描述。
+type toolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
 }
 
 // contentPart 是 OpenAI content 数组中的一个块：text 或 image_url。
@@ -54,7 +110,7 @@ type contentParts []contentPart
 
 // completer 屏蔽具体 LLM 服务，便于单测注入桩。
 type completer interface {
-	Complete(ctx context.Context, req completionRequest) (string, error)
+	Complete(ctx context.Context, req completionRequest) (completionResult, error)
 }
 
 type openaiClient struct { // 实现 completer
@@ -76,9 +132,11 @@ type openaiClient struct { // 实现 completer
 
 - 读体上限 **1 MiB**（`io.LimitReader`），超限视为错误。
 - 解析 `choices`：
-  - `choices` 为空，或缺少 `choices[0].message.content` → 视为错误（点名兼容「只返回 `reasoning_content` 的中继」）；
-  - `content` 不是字符串 → 错误。
-- 成功返回 `choices[0].message.content` 字符串，交由 [`persona.md`](persona.md) §8.7 清洗。
+  - `choices` 为空 → 错误；
+  - `choices[0].message.tool_calls` 非空 → 成功，`ToolCalls` 取该数组，`content` 为 null 或缺失时 `Content` 为空串（工具调用循环见 [`tools.md`](tools.md) §13.4）；
+  - 无 `tool_calls` 且缺少 `content` 或其为 null → 视为错误（点名兼容「只返回 `reasoning_content` 的中继」）；
+  - `content` 存在但既不是字符串也不是 null → 错误。
+- 成功返回 `completionResult`；最终文本 `Content` 交由 [`persona.md`](persona.md) §8.7 清洗。
 
 ## 9.3 超时、重试与错误
 
@@ -88,6 +146,7 @@ type openaiClient struct { // 实现 completer
 - 其它 `4xx` **不重试**。
 - 失败只记 `Warn`（含状态码与 ≤256 字节的响应体片段），reason `llm_error`，**绝不因此发送任何消息**。
 - 总耗时上界 = `(1 + llm_max_retries) * llm_timeout + 退避和`，不受核心 `RuleTimeout`/`EventTimeout` 约束（已脱离 Handler ctx）。
+- 以上是**单次 `Complete`** 的上界；启用工具时一轮生成最多 `tools_max_rounds + 1` 次 `Complete`，外加工具调用耗时（见 [`tools.md`](tools.md) §13.4）。
 
 ## 9.4 长度与成本控制
 
@@ -110,6 +169,7 @@ type openaiClient struct { // 实现 completer
 - `debug_prompts=true` 时以 Debug 输出 LLM 请求与响应：`persona llm 请求`（请求体 JSON）与 `persona llm 响应`（`status` + 响应体 JSON），`body` 均按 rune 截断 2048，均带 `host`/`model`。
 - `debug_prompts=true` 时请求体日志中的 data URL 折成 `data:<mime>;base64,<N bytes>`（N 为解码后字节数），完整 base64 从不落日志。
 - `debug_prompts=true` 时也不记录 `Authorization` 头（`llm_extra_headers` 同理，只记头名不记值）。
+- 工具调用日志与 `rag_api_token` 的处理见 [`tools.md`](tools.md) §13.5.5、§13.6。
 - 失败响应体片段截断到 256 字节后再记录。
 
 ## 9.6 替换服务

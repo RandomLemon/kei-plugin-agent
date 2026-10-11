@@ -45,7 +45,7 @@
                      │  定时器触发 onBatch
                      ▼
         后台生成协程 generate（由 Start 阶段保存的插件级 ctx 驱动）
-        · 取全局信号量 → 解析人格 → 渲染提示词 → 调用 LLM
+        · 取全局信号量 → 解析人格 → 渲染提示词 → 调用 LLM（启用工具时含工具调用循环）
         · 回复清洗 → BotAPI.Send → 回写历史/计数器
                      │
                      ▼
@@ -255,11 +255,15 @@ kei-plugin-persona/
 ├── state.go         每会话状态、历史环、计数器、Storage 读写
 ├── llm.go           OpenAI 兼容客户端（请求/响应/重试/超时）
 ├── vision.go        图片下载与 base64 内联（地址限制、体积上限、格式白名单、失败丢弃）
+├── tools.go         工具接口、内置工具表、按人格过滤与工具调用循环
+├── rag.go           知识库检索工具 knowledge_search（调用 itxiaRAG 检索接口、结果渲染）
 ├── commands.go      /persona 管理命令
 ├── policy.go        插件级名单策略：模式判定、/persona policy|list 渲染、persona:policy 读写
 ├── config_test.go   配置解析与校验单测
 ├── decision_test.go 决策模型单测（过滤/寻址/随机/窗口/epoch/名单/私聊）
 ├── llm_test.go      LLM 客户端单测（httptest.Server）
+├── tools_test.go    工具调用循环单测（桩 completer + 桩工具）
+├── rag_test.go      知识库检索工具单测（httptest.Server）
 ├── persona_test.go  人格解析、模板渲染、历史渲染、清洗单测
 ├── policy_test.go   名单策略单测（模式矩阵/命令输出/持久化/启动恢复）
 ├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍可用、Stop 等待在途写穿透）
@@ -280,6 +284,8 @@ kei-plugin-persona/
 | `state.go` | `channelState`、历史环、计数器、LRU、Storage 懒加载/写穿透。 |
 | `llm.go` | `completer` 接口与 `openaiClient` 实现（请求构造、响应解析、超时重试）。 |
 | `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
+| `tools.go` | `tool` 接口、`toolResult`、内置工具表 `builtinTools`、按人格过滤 `toolsFor`、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`tools.md`](tools.md) §13.2-13.4。 |
+| `rag.go` | `ragTool`/`newRAGTool`：`knowledge_search` 工具定义、itxiaRAG `POST /search/` 请求、响应解析与结果渲染，见 [`tools.md`](tools.md) §13.5。 |
 | `commands.go` | `/persona status|persona|on|off|reset|policy|list` 子命令实现。 |
 | `policy.go` | 插件级名单策略：`policyState`/`policyValue`、四值模式放行判定、`persona:policy` 读写、`/persona policy|list` 报告渲染。 |
 | `*_test.go` | 按文件名的领域单测；`e2e_test.go` 走 mock 适配器端到端。 |
@@ -313,7 +319,7 @@ kei-plugin-persona/
 | `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 12.2 |
 | 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
 | 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
-| `Config.Strings` 的 `[]any` 分支只保留 `string` 元素，**裸数字被静默丢弃**；故 `[]string` 键（`self_ids`/`trigger_keywords`/`group_list`/`private_list`）一律经本插件的 `readStringList` 读取 | `pkg/bot/api.go`；[`configuration.md`](configuration.md) §10.4 注 |
+| `Config.Strings` 的 `[]any` 分支只保留 `string` 元素，**裸数字被静默丢弃**；故 `[]string` 键（`self_ids`/`trigger_keywords`/`group_list`/`private_list`/`llm_vision_allowed_formats`/`tools_enabled` 与人格字段 `tools`）一律经本插件的 `readStringList` 读取 | `pkg/bot/api.go`；[`configuration.md`](configuration.md) §10.4 注 |
 | OneBot 把 `@全体成员` 上报为 `at` 段 `Data[bot.KeyUserID] == "all"`（非真实用户 ID）；`at` 段标准键为 `qq`、部分实现用 `user_id`，两者适配器都归一为 `KeyUserID` | `kei/adapters/onebot/message.go` `convertSegment` |
 | `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
 | `bot.Storage` 的后端由宿主选择：配置 `storage.type`（`memory` 默认 / `sqlite` / `mysql`）或 `kei.Options.Storage` 注入（非 nil 优先、由调用方拥有、`Run` 不关闭）；插件只见接口，各后端读写语义一致 | `pkg/kei/assemble.go` `buildStorage`；`pkg/kei/kei.go` `Options.Storage`；`internal/storage`；`docs/plugin.md` §11.2；`docs/configuration.md` §12.5 |

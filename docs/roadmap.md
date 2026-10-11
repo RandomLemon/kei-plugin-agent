@@ -8,11 +8,13 @@
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
+**例外**：第 13 章「工具调用与知识库检索」（[`tools.md`](tools.md)）及其在第 9-11 章引起的同步改动**只有文档、代码未实现**，见 §12.2 P7。
+
 质量门与开发环境见 [`testing.md`](testing.md) §11.1。
 
 ## 12.2 实现阶段
 
-以下阶段均已实现，保留作为实现顺序记录；每阶段都满足「可独立编译通过 + 测试全绿」。
+P1-P6 均已实现，保留作为实现顺序记录；P7 尚未实现。每阶段都满足「可独立编译通过 + 测试全绿」。
 
 ### P1 骨架
 
@@ -54,11 +56,21 @@
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
 - 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `persona:policy`，`Start` 同步恢复。
 
+### P7 工具调用与知识库检索（未实现）
+
+- `llm.go`：`completionRequest` 增加 `Followups`/`Tools`/`ToolChoice`，`completer.Complete` 改返回 `completionResult`，解析 `tool_calls`（[`llm.md`](llm.md) §9.1-9.2）；迁移全部调用点与测试桩。
+- `tools.go`：`tool` 接口、`builtinTools()` 内置工具表、`toolsFor` 按人格过滤、`completeWithTools`/`runTool` 循环与兜底；`generate` 改调用它（[`tools.md`](tools.md) §13.2-13.4、[`participation.md`](participation.md) §7.6）。
+- `rag.go`：`knowledge_search` 工具，调用 itxiaRAG `POST /api/v1/search/`（[`tools.md`](tools.md) §13.5）。
+- `config.go`：`tools_*` 与 `rag_*` 键、人格字段 `tools` 的读取与校验（[`configuration.md`](configuration.md) §10.1、§10.4，[`persona.md`](persona.md) §8.1）；`plugin.go` 在 `Setup` 按 `tools_enabled` 装配 `p.tools`。
+- 测试：[`testing.md`](testing.md) §11.2 中工具循环、`rag.go` 与 RAG 配置校验各行。
+- itxiaRAG 无需改代码，只需创建只读账号（[`tools.md`](tools.md) §13.7）。
+
 ## 12.3 已知缺口
 
 - **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **多模态输入可选**：`llm_vision_enabled=true` 时插件下载最近入站图片（上限 `llm_vision_max_images`，每条消息最多 1 张，单张上限 `llm_vision_max_image_bytes`）并以 base64 内联发送给视觉模型，默认关闭（见 [`llm.md`](llm.md) §9.1）。`llm_vision_allowed_formats` 非空时只发送清单内的格式（跳过清单外格式，不转码）。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
+- **无 MCP 客户端**：工具为插件内置实现（[`tools.md`](tools.md) §13.1）；需要接入 MCP 服务时另行实现 `tool` 提供方。
 
 ## 12.4 假设与兜底
 
