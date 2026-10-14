@@ -101,8 +101,8 @@ go test -race ./...
 | `llm.go` 响应含 `tool_calls`（`content` 为 null / 缺失 / 字符串） | 返回 `ToolCalls`，`Content` 为空串或原文本；无 `tool_calls` 且 `content` 为 null 仍是错误 |
 | `llm.go` 请求体（`Tools` 为空 / 非空 / `ToolChoice="none"`） | 空时不含 `tools` 与 `tool_choice`、只有 system + user 两条消息；非空时含 `tools` 且 `Followups` 按序追加在 user 之后；`none` 时含 `"tool_choice":"none"` |
 | 无可用工具（`p.tools` 为空，或人格 `tools: []`） | 只调用一次 `Complete`，请求不带 `tools`，行为与引入工具前一致 |
-| 人格 `tools` 三态（不写 / `[]` / 名单） | 不写 → 请求 `tools[]` 为 `p.tools` 全部且保持装配顺序；`[]` → 不带 `tools`；名单 → 只含名单内工具 |
-| 内置工具表 | `builtinTools()` 每项 `name` 等于 `build` 结果的 `Def().Function.Name`；`tools_enabled` 未列出的工具不构造 |
+| 人格 `tools` 三态（不写 / `[]` / 名单） | 不写 → 请求 `tools[]` 为当前 `p.tools` 全部且保持装配顺序；`[]` → 不带 `tools`；名单 → 与目录取交集；缺失的 MCP 名字不暴露 |
+| MCP 客户端与动态目录 | 按 [`mcp.md`](mcp.md) §14.8 精简新增覆盖：P8 调用闭环、失败不重放、取消三组；P9 刷新、并发快照与关闭两组。集中在 `mcp_test.go` 并复用现有桩；配置、人格和简单命令只补现有表格，不重复工具循环与 mock 适配器测试。阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)，质量门不变 |
 | 工具循环：模型先返回 `tool_calls` 再返回文本 | 工具被调用一次；第二次请求的 `Followups` 为 assistant(tool_calls) + tool(结果，`tool_call_id` 对应)；最终文本被发送 |
 | 工具循环：模型每轮都返回 `tool_calls`（`tools_max_rounds=2`） | 共 3 次 `Complete`，第 3 次 `ToolChoice="none"`；第 3 次仍返回 `tool_calls` 时只取 `content`（空则 `reason=empty_reply`） |
 | 工具循环：一轮返回 4 个调用 | 前 3 个执行；第 4 个回忽略文本、`status=ignored`；4 个 `tool_call_id` 都有对应 tool 消息 |
@@ -111,15 +111,10 @@ go test -race ./...
 | 工具循环：桩工具返回超长内容 / 非法 status | 内容按 `tools_result_max_chars` 截断并加 `…`；非 `ok` 的 status 记为 `error` |
 | 工具循环：执行工具前 `st.epoch` 已变化 | 不调用工具，`reason=stale`，不发送 |
 | 工具循环：后续轮次 `Complete` 失败 | `reason=llm_error`，不发送 |
-| `rag.go` 用 `httptest.Server`：200 有结果 | 请求为 `POST /search/`、`Authorization: Token <rag_api_token>`、体 `{"query":...,"top_k":rag_top_k}`；结果按 [`tools.md`](tools.md) §13.5.4 逐字渲染（日期/链接缺失时省略对应部分）、`Status=ok`、`Detail=hits_<n>` |
-| `rag.go` 截断 | 正文超 `rag_context_max_chars` 截断并加 `…`；总长超 `tools_result_max_chars` 停止追加后续条目、第 1 条始终保留 |
-| `rag.go` `result_status=no_result` / 空 `contexts` | 无结果文本、`Status=ok`、`Detail=no_result` |
-| `rag.go` 401 / 403 / 500 / 502 / 503 / 非法 JSON / 网络错误 | 失败文本（不含状态码与上游正文）、`Status=error`、`Detail` 为 `http_<码>`/`bad_json`/`network`，不重试 |
-| `rag.go` ctx 到期 | 尽快返回（不阻塞到服务端响应） |
-| `rag.go` 参数非法（非 JSON / 缺 `query` / 空白 `query`） | 不发请求，`Status=error`、`Detail=bad_args` |
-| 工具日志 | 任何日志都不含 `rag_api_token`；工具参数 `args` 只在 `debug_prompts=true` 时出现 |
-| 工具配置校验 | `tools_enabled=[weather]` → `不是已知工具`；人格 `tools: [knowledge_search]` 而 `tools_enabled` 为空 → `personas.<名>.tools=knowledge_search: 未在 tools_enabled 中启用`；`tools_max_rounds=0` → `必须 >= 1`；`tools_result_max_chars=0` → `必须 >= 1` |
-| RAG 配置校验 | `tools_enabled` 含 `knowledge_search` 且 `rag_base_url`/`rag_api_token` 为空 → `不能为空`；不含时二者可为空；`rag_top_k=0` → `必须 >= 1`、`21` → `必须 <= 20` |
+| 工具日志 | 工具参数 `args` 只在 `debug_prompts=true` 时出现；MCP 日志契约见 [`mcp.md`](mcp.md) §14.4-14.5，不再单独枚举日志测试 |
+| 工具配置校验 | `tools_max_rounds=0` → `必须 >= 1`；`tools_result_max_chars=0` → `必须 >= 1`；MCP 名称与启用规则补现有配置表，见 [`mcp.md`](mcp.md) §14.10.1 |
+
+P8 删除 `rag_test.go`、内置注册表测试和旧 RAG 配置用例；通用循环、人格三态与日志参数测试继续保留，桩与配置的迁移见 [`mcp.md`](mcp.md) §14.10.1。
 
 reason 词表（24 个）单测覆盖：`not_group`、`not_private`、`no_sender`、`not_allowed`、`bot_sender`、`command`、`empty_text`、`too_short`、`channel_off`、`loading`、`not_addressed`、`min_participants`、`cooldown`、`hour_quota`、`quiet_hours`、`inflight`、`probability`、`semaphore_full`、`skipped_by_llm`、`empty_reply`、`duplicate_reply`、`llm_error`、`send_error`、`stale`。
 
@@ -132,7 +127,7 @@ reason 词表（24 个）单测覆盖：`not_group`、`not_private`、`no_sender
 | `p.now` (`func() time.Time`) | `time.Now` | 冷却、配额、静默时段的确定性时间 |
 | `p.randFloat` (`func() float64`) | `rand.Float64` | 概率边界的确定性 |
 | `p.completer` | `*openaiClient` | 屏蔽真实 LLM（实现 completer 接口），返回固定文本、工具调用或错误 |
-| `p.tools` (`[]tool`) | 按 `tools_enabled` 从 `builtinTools()` 装配，默认为空 | 注入桩工具，断言调用参数与返回结果（[`tools.md`](tools.md) §13.2） |
+| `p.tools` (`[]tool`，受目录锁保护) | Setup 时为空，Start/reload 发布完整 MCP 目录；MCP 未启用时为空 | 注入桩工具，断言调用参数与返回结果（[`mcp.md`](mcp.md) §13.2） |
 | `p.api` (`bot.BotAPI`) | 注入的 `PluginContext.Bot` | 捕获 `Send` 调用；命令测试用 `bot.NewNoopReply()` 断言 `PlainText()` |
 
 禁止为测试引入第三方 mock 库，全部用标准库 testing + 手写桩。

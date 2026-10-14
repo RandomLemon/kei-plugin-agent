@@ -4,7 +4,7 @@
 
 ## 12.1 现状
 
-**文档与代码均已落地。** 仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`rag.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`rag_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**P1-P7 的历史实现已落地；MCP 的 P8、P9 均只有方案，尚未实现。** MCP 目标设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段文件改动、编码顺序、运行方式和验收条件见 [§14.10](mcp.md#1410-分阶段实现规划)。目标是删除内置工具，仅通过 MCP 接入；相关配置、命令与并发契约已同步到领域文档，当前代码仍只有启动时装配的内置工具，RAG 与内置注册尚未删除。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`rag.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`rag_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
@@ -12,7 +12,7 @@
 
 ## 12.2 实现阶段
 
-以下阶段均已实现，保留作为实现顺序记录；每阶段都满足「可独立编译通过 + 测试全绿」。
+P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的完成条件都包含「可独立编译、启动运行 + 对应测试与质量门全绿」，P8、P9 的详细实施口径统一放在 [`mcp.md#1410-分阶段实现规划`](mcp.md#1410-分阶段实现规划)。
 
 ### P1 骨架
 
@@ -54,21 +54,34 @@
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
 - 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `persona:policy`，`Start` 同步恢复。
 
-### P7 工具调用与知识库检索
+### P7 工具调用与知识库检索（历史实现）
+
+本节只记录 P7 的已交付能力；内置工具部分在 P8 删除，目标契约以 [`mcp.md`](mcp.md) 第 13-14 章为准。
 
 - `llm.go`：`completionRequest` 增加 `Followups`/`Tools`/`ToolChoice`，`completer.Complete` 改返回 `completionResult`，解析 `tool_calls`（[`llm.md`](llm.md) §9.1-9.2）；迁移全部调用点与测试桩。
-- `tools.go`：`tool` 接口、`builtinTools()` 内置工具表、`toolsFor` 按人格过滤、`completeWithTools`/`runTool` 循环与兜底；`generate` 改调用它（[`tools.md`](tools.md) §13.2-13.4、[`participation.md`](participation.md) §7.6）。
-- `rag.go`：`knowledge_search` 工具，调用 itxiaRAG `POST /api/v1/search/`（[`tools.md`](tools.md) §13.5）。
-- `config.go`：`tools_*` 与 `rag_*` 键、人格字段 `tools` 的读取与校验（[`configuration.md`](configuration.md) §10.1、§10.4，[`persona.md`](persona.md) §8.1）；`plugin.go` 在 `Setup` 按 `tools_enabled` 装配 `p.tools`。
-- 测试：[`testing.md`](testing.md) §11.2 中工具循环、`rag.go` 与 RAG 配置校验各行。
-- itxiaRAG 无需改代码，只需创建只读账号（[`tools.md`](tools.md) §13.7）。
+- `tools.go`：`tool` 接口、`builtinTools()` 内置工具表、`toolsFor` 按人格过滤、`completeWithTools`/`runTool` 循环与兜底；`generate` 改调用它（[`mcp.md`](mcp.md) §13.2-13.4、[`participation.md`](participation.md) §7.6）。
+- `rag.go`：内置 `knowledge_search` 调用 itxiaRAG `POST /api/v1/search/`，其实现与专用测试在 P8 删除。
+- `config.go`：P7 引入 `tools_*` 与 `rag_*` 键、人格字段 `tools`；`plugin.go` 在 Setup 按 `tools_enabled` 装配。P8 只保留通用调用限制与人格字段。
+- 测试：工具循环、内置 RAG、工具与 RAG 配置校验；P8 保留通用循环覆盖，移除内置专用用例。
+
+### P8 启动时接入外部 MCP 工具
+
+- 对应需求：MCP 唯一工具来源、连接与发现、模型调用、配置与人格过滤、生命周期。删除内置注册/装配、`rag.go`/专用测试及 `tools_enabled`/`rag_*` 配置；新增 `mcp.go`，同阶段完成协议、适配和对话闭环。
+- 阶段结束未配置 MCP 时正常聊天，配置 MCP 后完成外部工具调用与最终回复；旧人格工具名单需迁移为 MCP 名称，此阶段目录在启动时确定。
+- 文件改动、最小函数边界、编码顺序与逐项验收见 [P8 实现规划](mcp.md#14101-p8启动时接入外部工具)。
+
+### P9 运行时 MCP 工具目录刷新
+
+- 对应需求：管理员查看/刷新、完整目录发布、生成快照与关闭期间任务准入。复用 P8 客户端，主要改 `commands.go`、工具目录读写和任务登记，不增加配置键或新工具框架。
+- 阶段结束可以独立运行完整第一版：工具增加、删除和 schema 修改在 reload 后对下一次生成生效，当前生成保持自己的快照。
+- 文件改动、并发顺序、运行闭环与逐项验收见 [P9 实现规划](mcp.md#14102-p9运行时目录刷新)。
 
 ## 12.3 已知缺口
 
 - **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **多模态输入可选**：`llm_vision_enabled=true` 时插件下载最近入站图片（上限 `llm_vision_max_images`，每条消息最多 1 张，单张上限 `llm_vision_max_image_bytes`）并以 base64 内联发送给视觉模型，默认关闭（见 [`llm.md`](llm.md) §9.1）。`llm_vision_allowed_formats` 非空时只发送清单内的格式（跳过清单外格式，不转码）。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
-- **无 MCP 客户端**：工具为插件内置实现（[`tools.md`](tools.md) §13.1）；需要接入 MCP 服务时另行实现 `tool` 提供方。
+- **MCP 客户端待实现**：方案见 [`mcp.md`](mcp.md) 第 14 章，第一版为单端点 Streamable HTTP、工具适配与管理员运行时目录刷新；当前仍只有内置工具。
 
 ## 12.4 假设与兜底
 

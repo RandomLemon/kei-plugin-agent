@@ -54,14 +54,19 @@
 | `llm_vision_max_images` | int | `4` | 单次请求最多附加的图片数；`0` 表示不附加 |
 | `llm_vision_max_image_bytes` | int | `4194304` | 单张图片下载体积上限（字节）；超限的图丢弃 |
 | `llm_vision_allowed_formats` | []string | `[]` | 允许发给 LLM 的图片格式白名单（如 `[jpeg, png, gif]`）；空表示不过滤。匹配大小写不敏感，可写 `image/` 前缀，`jpg` 等价 `jpeg` |
-| `tools_enabled` | []string | `[]` | 要装配的内置工具名（如 `[knowledge_search]`）；空表示不启用工具。需 LLM 服务支持 tool calling（[`tools.md`](tools.md) §13.3） |
-| `tools_max_rounds` | int | `2` | 一轮生成最多允许几轮工具调用，之后以 `tool_choice: none` 取最终文本（[`tools.md`](tools.md) §13.4） |
+| `tools_max_rounds` | int | `2` | 一轮生成最多允许几轮工具调用，之后以 `tool_choice: none` 取最终文本（[`mcp.md`](mcp.md) §13.4） |
 | `tools_call_timeout` | duration | `8s` | 单次工具调用超时，由循环统一施加（不重试） |
 | `tools_result_max_chars` | int | `2000` | 单次工具结果的长度上限（rune），由循环统一硬截断 |
-| `rag_base_url` | string | `""` | `knowledge_search` 工具：itxiaRAG API 根地址（到 `/api/v1` 为止），请求 `POST {rag_base_url}/search/` |
-| `rag_api_token` | string | `""` | `knowledge_search` 工具：itxiaRAG 账号 Token，以 `Authorization: Token <值>` 发送；建议用 `KEI_PLUGINS_PERSONA_RAG_API_TOKEN` 注入 |
-| `rag_top_k` | int | `3` | `knowledge_search` 工具：每次检索返回的父段数，对应上游 `top_k` |
-| `rag_context_max_chars` | int | `600` | `knowledge_search` 工具：每条检索结果正文的截断上限（rune） |
+
+MCP 接入的配置键（行为见 [`mcp.md`](mcp.md) 第 14 章）：
+
+工具仅通过 MCP 提供。P8 移除原有 `tools_enabled` 与 `rag_*` 配置的读取和校验；旧配置需删除这些键，并将人格名单迁移为 MCP 名称，不增加旧配置兼容逻辑（[`mcp.md`](mcp.md) §14.10.1）。
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `mcp_url` | string | `""` | 完整 Streamable HTTP MCP 端点；唯一工具来源，空时工具目录为空。地址修改需重启，工具目录可运行时刷新；需 LLM 服务支持 tool calling |
+| `mcp_extra_headers` | map[string]string | `{}` | 每个 MCP HTTP 请求附带的固定头，如 Authorization；只经 PluginContext.Config 读取，不允许覆盖协议保留头 |
+| `mcp_timeout` | duration | `8s` | 初始化或完整目录刷新操作的总预算（含分页）；工具调用仍使用 `tools_call_timeout` |
 
 `plugins.persona.enabled` 由 kei 读取（布尔或标量简写），不进入插件配置，也不在上表内。
 
@@ -156,17 +161,15 @@ plugins:
     llm_vision_max_image_bytes: 4194304
     llm_vision_allowed_formats: []       # 例：["jpeg", "png", "gif"]；空表示不过滤
 
-    # ---- 工具（tools.md 第 13 章）----
-    tools_enabled: []             # 例：[knowledge_search]；需 LLM 服务支持 tool calling
+    # ---- 工具（mcp.md 第 13 章）----
     tools_max_rounds: 2
     tools_call_timeout: "8s"
     tools_result_max_chars: 2000
 
-    # ---- knowledge_search 工具（tools_enabled 含它时生效）----
-    rag_base_url: ""              # 例："http://127.0.0.1:8000/api/v1"
-    rag_api_token: ""             # 建议用 KEI_PLUGINS_PERSONA_RAG_API_TOKEN 注入
-    rag_top_k: 3
-    rag_context_max_chars: 600
+    # ---- MCP（唯一工具来源，mcp.md 第 14 章）----
+    mcp_url: ""                   # 例："http://127.0.0.1:9000/mcp"；空时无工具
+    mcp_extra_headers: {}
+    mcp_timeout: "8s"
 
     # ---- 回复 ----
     reply_max_chars: 200
@@ -194,7 +197,6 @@ kei 的规则（`internal/config/env.go` `applyPluginEnv`/`setSetting`）：
 ```bash
 # 密钥注入（推荐）
 export KEI_PLUGINS_PERSONA_LLM_API_KEY="sk-xxxx"
-export KEI_PLUGINS_PERSONA_RAG_API_TOKEN="<itxiaRAG 账号 Token>"
 
 # 数值覆盖（convertValue 会转成数值类型）
 export KEI_PLUGINS_PERSONA_RANDOM_PROBABILITY=0.3
@@ -206,7 +208,9 @@ export KEI_PLUGINS_PERSONA_DEBUG_PROMPTS=true
 export KEI_PLUGINS_PERSONA_SELF_IDS=123456789
 export KEI_PLUGINS_PERSONA_GROUP_LIST="389372103,389372104"
 export KEI_PLUGINS_PERSONA_LLM_VISION_ALLOWED_FORMATS="jpeg,png,gif"
-export KEI_PLUGINS_PERSONA_TOOLS_ENABLED="knowledge_search"
+
+# MCP 端点
+export KEI_PLUGINS_PERSONA_MCP_URL="http://127.0.0.1:9000/mcp"
 ```
 
 **覆盖范围**：`convertValue` 会把环境变量值按 YAML 规则解析（`internal/config/env.go`），因此映射与列表键**同样可以**用 env 覆盖，只是要写成 YAML/JSON 内联字面量：
@@ -215,6 +219,7 @@ export KEI_PLUGINS_PERSONA_TOOLS_ENABLED="knowledge_search"
 export KEI_PLUGINS_PERSONA_PERSONAS='{"default": {"prompt": "普通群友"}}'
 export KEI_PLUGINS_PERSONA_BINDINGS='[{channel_id: "389372103", persona: default}]'
 export KEI_PLUGINS_PERSONA_LLM_EXTRA_HEADERS='{"X-Test": "v"}'
+export KEI_PLUGINS_PERSONA_MCP_EXTRA_HEADERS='{"Authorization": "Bearer replace-me"}'
 ```
 
 真正的限制是**可读性与 shell 引用**，不是禁止：值要走一层 shell 解析再走一层 YAML 解析，多行 prompt 只能写成 `\n` 转义，引号需要仔细配对。因此复合结构**建议**写在 YAML 里；`personas`/`bindings`/`llm_extra_headers` 这类结构在 env 里仅适合极小规模或 CI 覆盖。标量键（含 `group_policy`/`private_policy`/`self_ids` 这类扁平键）在 env 里没有摩擦，推荐用于密钥与部署差异。
@@ -237,7 +242,7 @@ msg=环境变量覆盖配置 env=KEI_PLUGINS_PERSONA_SELF_IDS config=plugins.per
 persona: 配置错误 <key>=<值>: <原因>
 ```
 
-`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须 <= <n>`、`不是已知工具`、`未在 tools_enabled 中启用`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。
+`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须 <= <n>`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。MCP 配置另使用 `必须是带 host 的 http(s) URL`、`必须是字符串键值映射`、`不得覆盖 MCP 协议请求头`、`必须 > 0`；人格工具名使用 `不是合法 MCP 工具名`、`未启用 MCP`，凭据不作为错误中的 `<值>` 输出。
 
 固定示例：
 
@@ -248,17 +253,15 @@ persona: 配置错误 random_probability=1.5: 必须是 0..1 之间的小数
 persona: 配置错误 random_quiet_hours=23:00: 必须是 HH:MM-HH:MM 格式
 persona: 配置错误 context_max_messages=0: 必须 >= 1
 persona: 配置错误 group_policy=all: 必须是 off|open|whitelist|blacklist 之一
-persona: 配置错误 tools_enabled=weather: 不是已知工具
-persona: 配置错误 personas.helper.tools=weather: 未在 tools_enabled 中启用
-persona: 配置错误 rag_base_url=: 不能为空
-persona: 配置错误 rag_top_k=50: 必须 <= 20
+persona: 配置错误 personas.helper.tools=weather: 不是合法 MCP 工具名
+persona: 配置错误 personas.helper.tools=mcp__search_manual: 未启用 MCP
 ```
 
 逐键规则（覆盖 §10.1 全部键）：
 
 | 键 | 规则 |
 | --- | --- |
-| `personas` | 必须是非空对象；每个条目的 prompt 不能为空；条目的 `tools`（若写）中每个名字必须出现在 `tools_enabled` 中，否则以键 `personas.<名>.tools`、值为该名字报 `未在 tools_enabled 中启用` |
+| `personas` | 必须是非空对象；每个条目的 prompt 不能为空；`tools` 名单只接受合法 `mcp__` 名称且要求 MCP 已启用，不要求当前远端存在。以键 `personas.<名>.tools`、值为该名字报 `不是合法 MCP 工具名` 或 `未启用 MCP`（[`mcp.md`](mcp.md) §14.3） |
 | `default_persona` | 必须已存在于 `personas`，否则 `未在 personas 中定义` |
 | `persona_template` | 无额外校验（空值回落内建模板） |
 | `bindings` | 每个元素的 channel_id 不能为空；元素的 persona 必须已定义 |
@@ -304,16 +307,14 @@ persona: 配置错误 rag_top_k=50: 必须 <= 20
 | `llm_vision_max_images` | 必须 >= 0 |
 | `llm_vision_max_image_bytes` | 必须 >= 1 |
 | `llm_vision_allowed_formats` | 无额外校验；取值口径同 `self_ids`（列表键），元素按 §10.4 注归一 |
-| `tools_enabled` | 每个元素必须是 `builtinTools()` 登记的工具名（[`tools.md`](tools.md) §13.2），否则以该元素为值报 `不是已知工具`；取值口径同 `self_ids`（列表键）；重复元素去重 |
 | `tools_max_rounds` | 必须 >= 1 |
 | `tools_call_timeout` | 必须 >= 0 |
 | `tools_result_max_chars` | 必须 >= 1 |
-| `rag_base_url` | `tools_enabled` 含 `knowledge_search` 时不能为空，否则不校验 |
-| `rag_api_token` | `tools_enabled` 含 `knowledge_search` 时不能为空（itxiaRAG 查询接口要求认证），否则不校验 |
-| `rag_top_k` | 必须 >= 1，且必须 <= 20（上游 `top_k` 范围） |
-| `rag_context_max_chars` | 必须 >= 1 |
+| `mcp_url` | 空表示禁用；非空必须是带 host 的 http(s) URL，凭据放请求头；不自动补路径 |
+| `mcp_extra_headers` | 必须为字符串键值映射；不得覆盖 Content-Type、Accept、MCP-Protocol-Version、MCP-Session-Id，大小写不敏感；错误文案不输出请求头的值 |
+| `mcp_timeout` | 必须 > 0 |
 
-**注（列表键的取值口径）**：`self_ids`、`trigger_keywords`、`group_list`、`private_list`、`llm_vision_allowed_formats`、`tools_enabled` 是六个 `[]string` 键，人格字段 `personas.<名>.tools` 同样，均由 `readStringList` 读取，都兼容 YAML 的常见写法：`["123"]`（带引号）、`[123]`（裸数字）、`123`（裸标量）、`"123,456"`（逗号分隔）。元素一律按 YAML 语义转成字符串后使用，不做 `x.(string)` 类型断言丢弃。
+**注（列表键的取值口径）**：`self_ids`、`trigger_keywords`、`group_list`、`private_list`、`llm_vision_allowed_formats` 是五个 `[]string` 键，人格字段 `personas.<名>.tools` 同样，均由 `readStringList` 读取，都兼容 YAML 的常见写法：`["123"]`（带引号）、`[123]`（裸数字）、`123`（裸标量）、`"123,456"`（逗号分隔）。元素一律按 YAML 语义转成字符串后使用，不做 `x.(string)` 类型断言丢弃。
 
 这与 `bot.Config.Strings` 的差异是**有意的**：`Strings` 对 `[]any` 分支只保留字符串元素，裸数字被静默丢弃。QQ 号常被写成裸数字，一旦被丢成空列表，`self_ids` 就会落入「空 = 任意 At 均算寻址」的语义（见 [`participation.md`](participation.md) §7.2），表现为 `@任何人都触发回复`。同理，`group_policy: whitelist` + `group_list: [123456]`（裸数字）会让白名单形同虚设（全员被拒）。
 

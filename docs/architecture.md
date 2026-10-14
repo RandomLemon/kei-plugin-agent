@@ -14,6 +14,7 @@
 - 用「模式 + 单列表」的名单策略（`off`/`open`/`whitelist`/`blacklist`）按会话类型放行或拒绝：群聊按频道 ID、私聊按发送者 ID（见 [`participation.md`](participation.md) §7.8）。
 - 提供 `/persona` 管理命令切换人格、开关、名单策略与查看状态。
 - 用 `bot.Storage` 持久化每会话的运行时覆盖（人格、开关）与插件级名单策略。
+- 通过一个外部 MCP 服务接入工具，由模型按需调用，管理员可刷新工具目录（[`mcp.md`](mcp.md) 第 14 章）。
 
 **不做什么**
 
@@ -21,6 +22,7 @@
 - 不做持久化数据库：只用 `bot.Storage` 键值存储，进程重启丢历史与计数器、保留覆盖与开关。
 - 不引入 LLM SDK：LLM 调用用纯 `net/http`。
 - 不引入第三方依赖：运行时仅标准库 + `github.com/RandomLemon/kei`。
+- 不内置业务工具或直接连接知识库 API；所有工具经 MCP 提供，业务实现归外部服务。
 
 **与 kei 的关系**
 
@@ -93,21 +95,23 @@ reg.OnCommand("persona", p.handleCommand,
 	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 ```
 
-5. 构造 runtime：注入缝 `now`/`randFloat`/`completer`、全局信号量、`map[string]*channelState`、名单策略 `policyState`（初值取自配置键，见 [`participation.md`](participation.md) §7.8）。
+5. 配置了 MCP 时构造客户端，不在 Setup 联网（[`mcp.md`](mcp.md) §14.7）。
+6. 构造 runtime：注入缝 `now`/`randFloat`/`completer`、全局信号量、`map[string]*channelState`、名单策略 `policyState`（初值取自配置键，见 [`participation.md`](participation.md) §7.8）。
 
 **`Start(ctx)`**
 
 1. 保存插件级 `ctx` 与 `cancel`：`p.ctx, p.cancel = context.WithCancel(context.WithoutCancel(ctx))`。kei 传入的是**阶段上下文**（阶段函数返回后即被 cancel），直接用会让全部异步链路当场失效，故用 `context.WithoutCancel` 摘掉取消与超时（保留值），再由 `Stop` 经 `p.cancel` 终止后台工作。
 2. 同步读取插件级名单策略覆盖（`loadPolicy`，`Storage.Get` 带 1s 超时，失败只 `Warn` 并保留配置默认值）。同步是为了避免「策略未就绪窗口」内误放行/误拒；这一步用**阶段 ctx**（受阶段 15s 预算约束）。
 3. 异步恢复 Storage 覆盖（每会话懒加载，见第 4 章）。
-4. 启动完成，等待事件。
+4. 配置了 MCP 时，用阶段 ctx 与 `mcp_timeout` 共同限定首次初始化和完整目录加载；失败返回 error 阻止启动（[`mcp.md`](mcp.md) §14.7）。
+5. 启动完成，等待事件。
 
 **`Stop(ctx)`**
 
-1. 标记关闭（`closing`，此后不再接受新的写穿透）并 `p.writeWG.Wait()`：**先**等在途写穿透落库，**再**取消插件级 ctx。写穿透的 ctx 派生自 `p.ctx`，顺序反了会让持久化后端（sqlite/mysql）上的最后一次覆盖/策略写入被当场取消丢弃（见 §4.6）。
+1. 标记关闭（`closing`，此后不再接受新的写穿透或 MCP 刷新）并 `p.writeWG.Wait()`：**先**等在途写穿透落库，**再**取消插件级 ctx。写穿透的 ctx 派生自 `p.ctx`，顺序反了会让持久化后端（sqlite/mysql）上的最后一次覆盖/策略写入被当场取消丢弃（见 §4.6）。
 2. `p.cancel()`：取消插件级 ctx，终止全部派生工作。
 3. 停止全部 `channelState.timer`（每个 `time.Timer.Stop()`）。
-4. `p.wg.Wait()`：等待全部生成协程退出。
+4. `p.wg.Wait()`：等待全部生成与 MCP 刷新协程退出；有 MCP session 时，用 Stop 阶段 ctx 加超时发送 DELETE（[`mcp.md`](mcp.md) §14.7）。
 5. 幂等：重复调用安全。不需要额外 flush——每次变更都已触发写穿透，第 1 步只等在途的那一次（见第 4 章）。
 
 `register.go` 的注册与元信息（逐字）：
@@ -132,6 +136,7 @@ func (p *Plugin) Metadata() bot.Metadata {
 
 | 协程 | 生命周期 | 上限 |
 | --- | --- | --- |
+| MCP 目录刷新协程 | 管理员 reload 触发，以插件级 ctx 派生超时，完成后退出，由 `p.wg` 跟踪 | 插件级至多 1 个，不排队（[`mcp.md`](mcp.md) §14.6） |
 | 每会话生成协程 | 定时器触发时 `wg.Add(1)` 启动，`generate` 返回时 `Done` | 每会话至多 1 个（`inflight` 保证）；全局至多 `limits_max_concurrent` 个真正调用 LLM 的协程 |
 | 写穿透持久化协程 | 每次状态变更时启动，写完后退出 | 每变更一个，数量由变更频率决定；单次 `Set` 带 1s 超时；由 `writeWG` 跟踪，`Stop` 在取消插件级 ctx 之前等它们结束 |
 
@@ -143,9 +148,10 @@ func (p *Plugin) Metadata() bot.Metadata {
 | --- | --- | --- |
 | `map[string]*channelState` | `sync.RWMutex`（挂在 `Plugin` 上） | 读多写少；新增/淘汰会话时写锁 |
 | `channelState` 内部字段 | `channelState.mu sync.Mutex` | 每个会话独立锁，避免全局锁竞争 |
+| 工具目录 | `Plugin.toolsMu sync.RWMutex` | 读取时复制快照；网络和工具调用期间不持锁（[`mcp.md`](mcp.md) §14.6）；客户端另同步会话状态和请求 ID |
 | 全局计数器（`/persona status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
 | 最近发送消息 ID 环（reply 寻址用） | `sync.Mutex` | 容量常量 128 的环形缓冲 |
-| 写穿透关闭标记 `closing`（配 `writeWG`） | `sync.Mutex` + `sync.WaitGroup` | 写穿透与 `Stop` 用它串行化「是否已进入关闭」，保证在途写入不被取消（见 §3.1/§4.6） |
+| 写穿透关闭标记 `closing`（配 `writeWG`）、MCP 刷新在途标记 `mcpRefreshing` | 现有 `writeMu sync.Mutex` | 写穿透、刷新任务准入与 `Stop` 用它串行化关闭判定；写穿透由 `writeWG` 跟踪，刷新由 `p.wg` 跟踪（见 §3.1/§4.6、[`mcp.md`](mcp.md) §14.6） |
 
 ## 4. 状态与持久化
 
@@ -255,15 +261,15 @@ kei-plugin-persona/
 ├── state.go         每会话状态、历史环、计数器、Storage 读写
 ├── llm.go           OpenAI 兼容客户端（请求/响应/重试/超时）
 ├── vision.go        图片下载与 base64 内联（地址限制、体积上限、格式白名单、失败丢弃）
-├── tools.go         工具接口、内置工具表、按人格过滤与工具调用循环
-├── rag.go           知识库检索工具 knowledge_search（调用 itxiaRAG 检索接口、结果渲染）
+├── tools.go         工具接口、按人格过滤、目录快照与工具调用循环
+├── mcp.go           MCP 客户端、协议、工具发现、调用与结果转换
 ├── commands.go      /persona 管理命令
 ├── policy.go        插件级名单策略：模式判定、/persona policy|list 渲染、persona:policy 读写
 ├── config_test.go   配置解析与校验单测
 ├── decision_test.go 决策模型单测（过滤/寻址/随机/窗口/epoch/名单/私聊）
 ├── llm_test.go      LLM 客户端单测（httptest.Server）
 ├── tools_test.go    工具调用循环单测（桩 completer + 桩工具）
-├── rag_test.go      知识库检索工具单测（httptest.Server）
+├── mcp_test.go      MCP 调用、刷新、并发快照与取消（共用 httptest.Server 桩）
 ├── persona_test.go  人格解析、模板渲染、历史渲染、清洗单测
 ├── policy_test.go   名单策略单测（模式矩阵/命令输出/持久化/启动恢复）
 ├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍可用、Stop 等待在途写穿透）
@@ -284,9 +290,9 @@ kei-plugin-persona/
 | `state.go` | `channelState`、历史环、计数器、LRU、Storage 懒加载/写穿透。 |
 | `llm.go` | `completer` 接口与 `openaiClient` 实现（请求构造、响应解析、超时重试）。 |
 | `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
-| `tools.go` | `tool` 接口、`toolResult`、内置工具表 `builtinTools`、按人格过滤 `toolsFor`、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`tools.md`](tools.md) §13.2-13.4。 |
-| `rag.go` | `ragTool`/`newRAGTool`：`knowledge_search` 工具定义、itxiaRAG `POST /search/` 请求、响应解析与结果渲染，见 [`tools.md`](tools.md) §13.5。 |
-| `commands.go` | `/persona status|persona|on|off|reset|policy|list` 子命令实现。 |
+| `tools.go` | `tool` 接口、`toolResult`、按人格过滤 `toolsFor`、目录快照/整体替换、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`mcp.md`](mcp.md) §13.2-13.4。 |
+| `mcp.go` | `mcpClient`/`mcpTool`：初始化、HTTP/SSE、会话、工具列表与调用、结果转换；唯一工具来源，见 [`mcp.md`](mcp.md) 第 14 章。 |
+| `commands.go` | `/persona status|persona|on|off|reset|policy|list|tools` 子命令实现。 |
 | `policy.go` | 插件级名单策略：`policyState`/`policyValue`、四值模式放行判定、`persona:policy` 读写、`/persona policy|list` 报告渲染。 |
 | `*_test.go` | 按文件名的领域单测；`e2e_test.go` 走 mock 适配器端到端。 |
 
@@ -319,7 +325,7 @@ kei-plugin-persona/
 | `bots[].plugins` 白名单由引擎自动收窄规则适用范围，插件无需自己过滤 bot | `docs/configuration.md` 12.2 |
 | 插件不得读环境变量/文件，配置只经 `PluginContext.Config` | kei `AGENTS.md` 2.1 |
 | 部分 `Config` 方法：`Get` 支持 `"a.b"` 多级路径、`Duration` 支持 `"90s"` 字符串与「数字=秒」、`Strings` 支持 `[]any` 与逗号分隔字符串；无 `Float`（浮点用 `Get` + 类型断言） | `pkg/bot/api.go` |
-| `Config.Strings` 的 `[]any` 分支只保留 `string` 元素，**裸数字被静默丢弃**；故 `[]string` 键（`self_ids`/`trigger_keywords`/`group_list`/`private_list`/`llm_vision_allowed_formats`/`tools_enabled` 与人格字段 `tools`）一律经本插件的 `readStringList` 读取 | `pkg/bot/api.go`；[`configuration.md`](configuration.md) §10.4 注 |
+| `Config.Strings` 的 `[]any` 分支只保留 `string` 元素，**裸数字被静默丢弃**；故 `[]string` 键（`self_ids`/`trigger_keywords`/`group_list`/`private_list`/`llm_vision_allowed_formats` 与人格字段 `tools`）一律经本插件的 `readStringList` 读取 | `pkg/bot/api.go`；[`configuration.md`](configuration.md) §10.4 注 |
 | OneBot 把 `@全体成员` 上报为 `at` 段 `Data[bot.KeyUserID] == "all"`（非真实用户 ID）；`at` 段标准键为 `qq`、部分实现用 `user_id`，两者适配器都归一为 `KeyUserID` | `kei/adapters/onebot/message.go` `convertSegment` |
 | `Storage.Get` 键不存在时返回可被 `errors.Is(err, bot.ErrNotFound)` 识别的错误 | `pkg/bot/api.go` |
 | `bot.Storage` 的后端由宿主选择：配置 `storage.type`（`memory` 默认 / `sqlite` / `mysql`）或 `kei.Options.Storage` 注入（非 nil 优先、由调用方拥有、`Run` 不关闭）；插件只见接口，各后端读写语义一致 | `pkg/kei/assemble.go` `buildStorage`；`pkg/kei/kei.go` `Options.Storage`；`internal/storage`；`docs/plugin.md` §11.2；`docs/configuration.md` §12.5 |

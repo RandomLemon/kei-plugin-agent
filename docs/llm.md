@@ -20,15 +20,15 @@
                                        {"type":"text","text":"小傲娇: 打球可以啊"}]}]}
 ```
 
-当前人格有可用工具（`tools_enabled` 与人格 `tools`，见 [`tools.md`](tools.md) §13.3）时，请求体追加 `tools`（工具定义数组），工具轮产生的消息按序追加在 `user` 之后；轮数用尽的最后一次请求另带 `"tool_choice":"none"`，其余请求不发 `tool_choice`：
+当前人格有可用工具（MCP 目录与人格 `tools`，见 [`mcp.md`](mcp.md) §13.3）时，请求体追加 `tools`（工具定义数组），工具轮产生的消息按序追加在 `user` 之后；轮数用尽的最后一次请求另带 `"tool_choice":"none"`，其余请求不发 `tool_choice`：
 
 ```json
 {"model":"<llm_model>","temperature":0.8,"max_tokens":200,
- "tools":[{"type":"function","function":{"name":"knowledge_search","description":"...","parameters":{...}}}],
+ "tools":[{"type":"function","function":{"name":"mcp__search_manual","description":"...","parameters":{...}}}],
  "messages":[{"role":"system","content":"<系统提示词>"},
              {"role":"user","content":[...]},
-             {"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"knowledge_search","arguments":"{\"query\":\"Windows 10 安装\"}"}}]},
-             {"role":"tool","tool_call_id":"call_1","content":"[知识库检索结果]\n..."}]}
+             {"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"mcp__search_manual","arguments":"{\"query\":\"Windows 10 安装\"}"}}]},
+             {"role":"tool","tool_call_id":"call_1","content":"[外部工具结果]\n..."}]}
 ```
 
 没有可用工具时请求体与上例（无 `tools`、只有 system + user 两条消息）完全一致。
@@ -46,7 +46,7 @@
 type completionRequest struct {
 	System      string
 	User        contentParts  // user 消息的 content 数组（text + 可选 image_url）
-	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（tools.md §13.4）
+	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（mcp.md §13.4）
 	Tools       []toolDef     // 为空时请求体不带 tools 字段
 	ToolChoice  string        // 为空时不发 tool_choice；轮数用尽时为 "none"
 	Temperature float64
@@ -133,7 +133,7 @@ type openaiClient struct { // 实现 completer
 - 读体上限 **1 MiB**（`io.LimitReader`），超限视为错误。
 - 解析 `choices`：
   - `choices` 为空 → 错误；
-  - `choices[0].message.tool_calls` 非空 → 成功，`ToolCalls` 取该数组，`content` 为 null 或缺失时 `Content` 为空串（工具调用循环见 [`tools.md`](tools.md) §13.4）；
+  - `choices[0].message.tool_calls` 非空 → 成功，`ToolCalls` 取该数组，`content` 为 null 或缺失时 `Content` 为空串（工具调用循环见 [`mcp.md`](mcp.md) §13.4）；
   - 无 `tool_calls` 且缺少 `content` 或其为 null → 视为错误（点名兼容「只返回 `reasoning_content` 的中继」）；
   - `content` 存在但既不是字符串也不是 null → 错误。
 - 成功返回 `completionResult`；最终文本 `Content` 交由 [`persona.md`](persona.md) §8.7 清洗。
@@ -146,7 +146,7 @@ type openaiClient struct { // 实现 completer
 - 其它 `4xx` **不重试**。
 - 失败只记 `Warn`（含状态码与 ≤256 字节的响应体片段），reason `llm_error`，**绝不因此发送任何消息**。
 - 总耗时上界 = `(1 + llm_max_retries) * llm_timeout + 退避和`，不受核心 `RuleTimeout`/`EventTimeout` 约束（已脱离 Handler ctx）。
-- 以上是**单次 `Complete`** 的上界；启用工具时一轮生成最多 `tools_max_rounds + 1` 次 `Complete`，外加工具调用耗时（见 [`tools.md`](tools.md) §13.4）。
+- 以上是**单次 `Complete`** 的上界；启用工具时一轮生成最多 `tools_max_rounds + 1` 次 `Complete`，外加工具调用耗时（见 [`mcp.md`](mcp.md) §13.4）。
 
 ## 9.4 长度与成本控制
 
@@ -169,7 +169,7 @@ type openaiClient struct { // 实现 completer
 - `debug_prompts=true` 时以 Debug 输出 LLM 请求与响应：`persona llm 请求`（请求体 JSON）与 `persona llm 响应`（`status` + 响应体 JSON），`body` 均按 rune 截断 2048，均带 `host`/`model`。
 - `debug_prompts=true` 时请求体日志中的 data URL 折成 `data:<mime>;base64,<N bytes>`（N 为解码后字节数），完整 base64 从不落日志。
 - `debug_prompts=true` 时也不记录 `Authorization` 头（`llm_extra_headers` 同理，只记头名不记值）。
-- 工具调用日志与 `rag_api_token` 的处理见 [`tools.md`](tools.md) §13.5.5、§13.6。
+- 工具调用日志见 [`mcp.md`](mcp.md) §13.6；MCP 凭据与 session ID 的处理见 [`mcp.md`](mcp.md) §14.4-14.5。
 - 失败响应体片段截断到 256 字节后再记录。
 
 ## 9.6 替换服务

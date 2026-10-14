@@ -16,7 +16,7 @@
 | `temperature` | float | `llm_temperature` | 该人格的采样温度覆盖 |
 | `max_tokens` | int | `llm_max_tokens` | 该人格的最大生成 token 覆盖 |
 | `skip_token` | string | `llm_skip_token` | 该人格的 skip 哨兵覆盖 |
-| `tools` | []string | 不写 = 继承 `tools_enabled` | 该人格可用的工具名：不写继承全部已启用工具，`[]` 表示不使用工具，名单内的名字必须出现在 `tools_enabled` 中（[`tools.md`](tools.md) §13.3） |
+| `tools` | []string | 不写 = 继承当前全部工具 | 该人格可用的 MCP 工具名：不写继承全部，`[]` 表示不使用工具；名单取与当前目录的交集，名称与启用校验见 [`mcp.md`](mcp.md) §14.3 |
 
 示例：
 
@@ -99,14 +99,16 @@ reg.OnCommand("persona", p.handleCommand,
 | `list` | 打印群聊/私聊名单 |
 | `list <group\|private>` | 打印单侧名单 |
 | `list <group\|private> add\|del <id>` | 追加/移除名单项 → 写穿透持久化 |
+| `tools` | 只读本地目录，显示全部工具名称（[`mcp.md`](mcp.md) §14.6） |
+| `tools reload` | 后台刷新 MCP 工具目录；Handler 立即回复，完成后另发结果（[`mcp.md`](mcp.md) §14.6） |
 | 未知子命令 | 回用法文本 |
 
-命令回复用注入的 `Reply`；命令**不做 LLM 调用、不进历史**。
+命令的即时回复用注入的 `Reply`；命令**不做 LLM 调用、不进历史**。`tools reload` 的后续结果由插件级 ctx 驱动的后台任务通过 `BotAPI.Send` 发送，不能使用已返回 Handler 的 ctx/Reply。
 
 用法文本（逐字）：
 
 ```text
-用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]
+用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]
 ```
 
 `policy`/`list` 的输出行（逐字，语义与空名单行为见 [`participation.md`](participation.md) §7.8）：
@@ -121,6 +123,20 @@ reg.OnCommand("persona", p.handleCommand,
 - 这两个子命令同样只走 `bot.WithAdmin()`（仅管理员），不做 LLM 调用、不进历史。
 - 参数非法或缺参回用法文本；`add` 已存在、`del` 不存在均幂等（回同一行，不产生写穿透）。
 - 策略是**插件级**（不是每会话），持久化键 `persona:policy`（[`architecture.md`](architecture.md) §4.4）。
+
+`tools` 的输出行（逐字；动态目录与后台刷新行为见 [`mcp.md`](mcp.md) §14.6，子命令在 P9 接入）：
+
+```text
+/persona tools                   → persona: tools=[<当前全部工具名，以空格分隔>]
+/persona tools reload            → persona: 开始刷新 MCP 工具
+未启用 MCP                       → persona: 未启用 MCP
+已有刷新在途                     → persona: MCP 工具正在刷新
+插件关闭期间                     → persona: 插件正在关闭，无法刷新 MCP 工具
+后台刷新成功                     → persona: MCP 工具刷新成功，工具 <N> 个
+后台刷新失败                     → persona: MCP 工具刷新失败：<简短原因>
+```
+
+目录为空时输出 `persona: tools=[]`；`N` 是本次发布的工具总数，全部来自 MCP。只有 reload 成功发布目录后才发送成功通知，失败原因不得包含凭据或 session ID；语法非法仍回用法文本。
 
 **`/persona status` 输出（字段顺序固定，`·` 分隔，逐字）**：
 
