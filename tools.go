@@ -3,8 +3,6 @@ package persona
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"net/http"
 	"slices"
 	"time"
 	"unicode/utf8"
@@ -28,49 +26,15 @@ type tool interface {
 // toolResult 是一次工具调用的结果。
 type toolResult struct {
 	Content string // 作为 role=tool 消息的 content（循环会再按 tools_result_max_chars 截断）
-	Status  string // 工具只返回 "ok" 或 "error"；其余取值由循环设置（tools.md §13.6）
+	Status  string // 工具只返回 "ok" 或 "error"；其余取值由循环设置（mcp.md §13.6）
 	Detail  string // 工具自定义的细分原因，只进日志，可为空（如 "no_result"、"http_503"）
-}
-
-// toolSpec 是一个内置工具的登记项；name 必须等于 build 结果的 Def().Function.Name。
-type toolSpec struct {
-	name  string
-	build func(cfg *config, hc *http.Client, log *slog.Logger) tool
-}
-
-// builtinTools 返回全部内置工具的登记表。新增工具只需在此追加一项。
-func builtinTools() []toolSpec {
-	return []toolSpec{
-		{name: ragToolName, build: newRAGTool},
-	}
-}
-
-// findToolSpec 按名字查找内置工具登记项。
-func findToolSpec(name string) (toolSpec, bool) {
-	specs := builtinTools()
-	i := slices.IndexFunc(specs, func(s toolSpec) bool { return s.name == name })
-	if i < 0 {
-		return toolSpec{}, false
-	}
-	return specs[i], true
-}
-
-// buildTools 按 tools_enabled 的顺序装配工具；名字已在 loadConfig 校验过。
-func buildTools(cfg *config, hc *http.Client, log *slog.Logger) []tool {
-	var out []tool
-	for _, name := range cfg.toolsEnabled {
-		if spec, ok := findToolSpec(name); ok {
-			out = append(out, spec.build(cfg, hc, log))
-		}
-	}
-	return out
 }
 
 // toolsFor 返回人格可用的工具：不写 tools 时继承全部已装配工具，否则按名单过滤，保持装配顺序。
 func (p *Plugin) toolsFor(personaName string) []tool {
 	pf := p.cfg.personas[personaName]
 	if !pf.hasTools {
-		return p.tools
+		return append([]tool(nil), p.tools...)
 	}
 	var out []tool
 	for _, t := range p.tools {
@@ -82,7 +46,7 @@ func (p *Plugin) toolsFor(personaName string) []tool {
 }
 
 // completeWithTools 执行一轮生成：人格无可用工具时只调一次 Complete；
-// 否则按 tools.md §13.4 循环执行工具调用，直到模型给出文本或轮数用尽。
+// 否则按 mcp.md §13.4 循环执行工具调用，直到模型给出文本或轮数用尽。
 func (p *Plugin) completeWithTools(st *channelState, epoch uint64, personaName string, req completionRequest) (string, error) {
 	tools := p.toolsFor(personaName)
 	if len(tools) == 0 {

@@ -18,7 +18,7 @@ import (
 type completionRequest struct {
 	System      string
 	User        contentParts  // user 消息的 content 数组（text + 可选 image_url）
-	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（tools.md §13.4）
+	Followups   []chatMessage // 工具轮追加在 user 之后的 assistant/tool 消息（mcp.md §13.4）
 	Tools       []toolDef     // 为空时请求体不带 tools 字段
 	ToolChoice  string        // 为空时不发 tool_choice；轮数用尽时为 "none"
 	Temperature float64

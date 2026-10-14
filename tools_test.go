@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+const stubToolName = "mcp__search"
 
 // stubCompleter 按调用序号返回脚本化结果，并记录每次请求。
 type stubCompleter struct {
@@ -71,14 +72,11 @@ func callsOf(names ...string) []toolCall {
 	return out
 }
 
-// newToolEnv 构造启用 knowledge_search 的测试环境，并把 completer 与 p.tools 换成桩。
+// newToolEnv 构造测试环境，并把 completer 与 p.tools 换成桩。
 func newToolEnv(t *testing.T, comp *stubCompleter, tools []tool, mutate func(map[string]any)) *testEnv {
 	t.Helper()
 	env := newTestEnv(t, nil, func(c map[string]any) {
 		fastConfig(c)
-		c["tools_enabled"] = []any{ragToolName}
-		c["rag_base_url"] = "http://rag.test/api/v1"
-		c["rag_api_token"] = "secret-token"
 		if mutate != nil {
 			mutate(c)
 		}
@@ -97,35 +95,26 @@ func runLoop(env *testEnv, personaName string) (string, error) {
 	return env.p.completeWithTools(st, epoch, personaName, completionRequest{System: "s", User: textParts("u")})
 }
 
-func TestBuiltinToolsNamesMatch(t *testing.T) {
-	cfg := &config{ragBaseURL: "http://rag.test/api/v1", ragTopK: 3, ragContextMaxChars: 600, toolsResultMaxChars: 2000}
-	for _, spec := range builtinTools() {
-		if got := spec.build(cfg, http.DefaultClient, nil).Def().Function.Name; got != spec.name {
-			t.Errorf("登记名 %q 与 Def 名 %q 不一致", spec.name, got)
-		}
-	}
-	if got := buildTools(cfg, http.DefaultClient, nil); len(got) != 0 {
-		t.Fatalf("tools_enabled 为空时不应构造工具: %d", len(got))
-	}
-}
-
 func TestToolsForPersona(t *testing.T) {
-	search, extra := &stubTool{name: ragToolName}, &stubTool{name: "extra"}
+	search, extra := &stubTool{name: stubToolName}, &stubTool{name: "mcp__extra"}
 	comp := &stubCompleter{fn: func(int) (completionResult, error) { return completionResult{Content: "ok"}, nil }}
 	env := newToolEnv(t, comp, []tool{search, extra}, func(c map[string]any) {
 		c["personas"] = map[string]any{
 			"default": "继承",
 			"quiet":   map[string]any{"prompt": "p", "tools": []any{}},
-			"picked":  map[string]any{"prompt": "p", "tools": []any{ragToolName}},
+			"picked":  "p",
 		}
 	})
+	pf := env.p.cfg.personas["picked"]
+	pf.Tools, pf.hasTools = []string{stubToolName, "mcp__missing"}, true
+	env.p.cfg.personas["picked"] = pf
 	cases := []struct {
 		persona string
 		want    []string
 	}{
-		{"default", []string{ragToolName, "extra"}},
+		{"default", []string{stubToolName, "mcp__extra"}},
 		{"quiet", nil},
-		{"picked", []string{ragToolName}},
+		{"picked", []string{stubToolName}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.persona, func(t *testing.T) {
@@ -151,10 +140,10 @@ func TestToolsForPersona(t *testing.T) {
 }
 
 func TestToolLoopThenText(t *testing.T) {
-	search := &stubTool{name: ragToolName}
+	search := &stubTool{name: stubToolName}
 	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 		if n == 0 {
-			return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+			return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 		}
 		return completionResult{Content: "先重装驱动"}, nil
 	}}
@@ -187,9 +176,9 @@ func TestToolLoopThenText(t *testing.T) {
 }
 
 func TestToolLoopMaxRounds(t *testing.T) {
-	search := &stubTool{name: ragToolName}
+	search := &stubTool{name: stubToolName}
 	comp := &stubCompleter{fn: func(int) (completionResult, error) {
-		return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+		return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 	}}
 	env := newToolEnv(t, comp, []tool{search}, nil)
 	env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
@@ -213,17 +202,18 @@ func TestToolLoopMaxRounds(t *testing.T) {
 }
 
 func TestToolLoopCallLimits(t *testing.T) {
-	search, extra := &stubTool{name: ragToolName}, &stubTool{name: "extra"}
+	search, extra := &stubTool{name: stubToolName}, &stubTool{name: "mcp__extra"}
 	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 		if n == 0 {
 			// 4 个调用：未知名、人格不可用的已装配工具、可用工具、超出上限的第 4 个。
-			return completionResult{ToolCalls: callsOf("nope", "extra", ragToolName, ragToolName)}, nil
+			return completionResult{ToolCalls: callsOf("nope", "mcp__extra", stubToolName, stubToolName)}, nil
 		}
 		return completionResult{Content: "好"}, nil
 	}}
-	env := newToolEnv(t, comp, []tool{search, extra}, func(c map[string]any) {
-		c["personas"] = map[string]any{"default": map[string]any{"prompt": "p", "tools": []any{ragToolName}}}
-	})
+	env := newToolEnv(t, comp, []tool{search, extra}, nil)
+	pf := env.p.cfg.personas["default"]
+	pf.Tools, pf.hasTools = []string{stubToolName}, true
+	env.p.cfg.personas["default"] = pf
 	if _, err := runLoop(env, "default"); err != nil {
 		t.Fatalf("completeWithTools: %v", err)
 	}
@@ -236,7 +226,7 @@ func TestToolLoopCallLimits(t *testing.T) {
 	}
 	want := []string{
 		"[工具调用失败] 未知工具 nope。",
-		"[工具调用失败] 未知工具 extra。",
+		"[工具调用失败] 未知工具 mcp__extra。",
 		"资料",
 		"[工具调用被忽略] 本轮工具调用过多。",
 	}
@@ -253,14 +243,14 @@ func TestToolLoopCallLimits(t *testing.T) {
 
 func TestToolLoopTimeout(t *testing.T) {
 	var hasDeadline bool
-	slow := &stubTool{name: ragToolName, call: func(ctx context.Context, _ string) toolResult {
+	slow := &stubTool{name: stubToolName, call: func(ctx context.Context, _ string) toolResult {
 		_, hasDeadline = ctx.Deadline()
 		<-ctx.Done()
 		return toolResult{Status: "error", Detail: "network"}
 	}}
 	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 		if n == 0 {
-			return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+			return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 		}
 		return completionResult{Content: "好"}, nil
 	}}
@@ -272,7 +262,7 @@ func TestToolLoopTimeout(t *testing.T) {
 	if !hasDeadline {
 		t.Fatal("工具应收到带截止时间的 ctx")
 	}
-	if got := *comp.requests()[1].Followups[1].Content; got != "[工具调用失败] 工具 knowledge_search 超时。" {
+	if got := *comp.requests()[1].Followups[1].Content; got != "[工具调用失败] 工具 mcp__search 超时。" {
 		t.Fatalf("tool 消息 = %q", got)
 	}
 	if !env.cap.hasAttr("status", "timeout") {
@@ -281,12 +271,12 @@ func TestToolLoopTimeout(t *testing.T) {
 }
 
 func TestToolLoopResultLimits(t *testing.T) {
-	odd := &stubTool{name: ragToolName, call: func(context.Context, string) toolResult {
+	odd := &stubTool{name: stubToolName, call: func(context.Context, string) toolResult {
 		return toolResult{Content: "abcdefgh", Status: "weird"}
 	}}
 	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 		if n == 0 {
-			return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+			return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 		}
 		return completionResult{Content: "好"}, nil
 	}}
@@ -303,14 +293,14 @@ func TestToolLoopResultLimits(t *testing.T) {
 }
 
 func TestToolLoopStale(t *testing.T) {
-	search := &stubTool{name: ragToolName}
+	search := &stubTool{name: stubToolName}
 	var st *channelState
 	comp := &stubCompleter{fn: func(int) (completionResult, error) {
 		// 模拟生成期间被 /persona off|switch|reset。
 		st.mu.Lock()
 		st.epoch++
 		st.mu.Unlock()
-		return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+		return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 	}}
 	env := newToolEnv(t, comp, []tool{search}, nil)
 	st = env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
@@ -330,11 +320,11 @@ func TestToolLoopStale(t *testing.T) {
 func TestToolLoopLaterCompleteFails(t *testing.T) {
 	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 		if n == 0 {
-			return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+			return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 		}
 		return completionResult{}, errors.New("http 500")
 	}}
-	env := newToolEnv(t, comp, []tool{&stubTool{name: ragToolName}}, nil)
+	env := newToolEnv(t, comp, []tool{&stubTool{name: stubToolName}}, nil)
 	env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
 	_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
 	if !env.waitReason("llm_error", 2*time.Second) {
@@ -350,11 +340,11 @@ func TestToolLogArgsOnlyWithDebug(t *testing.T) {
 		t.Run(fmt.Sprint(debug), func(t *testing.T) {
 			comp := &stubCompleter{fn: func(n int) (completionResult, error) {
 				if n == 0 {
-					return completionResult{ToolCalls: callsOf(ragToolName)}, nil
+					return completionResult{ToolCalls: callsOf(stubToolName)}, nil
 				}
 				return completionResult{Content: "好"}, nil
 			}}
-			env := newToolEnv(t, comp, []tool{&stubTool{name: ragToolName}}, func(c map[string]any) { c["debug_prompts"] = debug })
+			env := newToolEnv(t, comp, []tool{&stubTool{name: stubToolName}}, func(c map[string]any) { c["debug_prompts"] = debug })
 			if _, err := runLoop(env, "default"); err != nil {
 				t.Fatalf("completeWithTools: %v", err)
 			}

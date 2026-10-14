@@ -58,7 +58,8 @@ type Plugin struct {
 	now       func() time.Time
 	randFloat func() float64
 	completer completer
-	tools     []tool // 按 tools_enabled 装配的工具（tools.md §13.3）
+	tools     []tool // 当前 MCP 工具目录（mcp.md §13.3）
+	mcp       *mcpClient
 
 	statSkips     atomic.Int64
 	statLLMErrors atomic.Int64
@@ -105,7 +106,10 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	p.sem = newSemaphore(cfg.limitsMaxConcurrent)
 	p.replyIDs = newIDRing(replyIDRingSize)
 	p.completer = newOpenAIClient(cfg, pc.HTTPClient, log)
-	p.tools = buildTools(cfg, pc.HTTPClient, log)
+	p.tools = nil
+	if cfg.mcpURL != "" {
+		p.mcp = newMCPClient(cfg, pc.HTTPClient)
+	}
 
 	reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
 		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("persona:group"))
@@ -127,6 +131,19 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 func (p *Plugin) Start(ctx context.Context) error {
 	p.ctx, p.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	p.loadPolicy(ctx)
+	if p.mcp != nil {
+		tools, err := p.loadMCPTools(ctx)
+		if err != nil {
+			p.cancel()
+			cleanupCtx, cancel := context.WithTimeout(ctx, p.cfg.mcpTimeout)
+			defer cancel()
+			if cleanupErr := p.mcp.close(cleanupCtx); cleanupErr != nil {
+				p.log.Warn("persona: MCP 会话清理失败", "err", cleanupErr)
+			}
+			return err
+		}
+		p.tools = tools
+	}
 	return nil
 }
 
@@ -181,5 +198,10 @@ func (p *Plugin) Stop(ctx context.Context) error {
 		st.stopTimer()
 	}
 	p.wg.Wait()
+	if p.mcp != nil {
+		cleanupCtx, cancel := context.WithTimeout(ctx, p.cfg.mcpTimeout)
+		defer cancel()
+		return p.mcp.close(cleanupCtx)
+	}
 	return nil
 }

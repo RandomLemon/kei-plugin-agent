@@ -4,7 +4,7 @@
 
 ## 12.1 现状
 
-**P1-P7 的历史实现已落地；MCP 的 P8、P9 均只有方案，尚未实现。** MCP 目标设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段文件改动、编码顺序、运行方式和验收条件见 [§14.10](mcp.md#1410-分阶段实现规划)。目标是删除内置工具，仅通过 MCP 接入；相关配置、命令与并发契约已同步到领域文档，当前代码仍只有启动时装配的内置工具，RAG 与内置注册尚未删除。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的完整实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`rag.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`rag_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**P1-P8 已落地；P9 运行时目录刷新尚未实现。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。目录更新暂需重启，尚无 `/persona tools` 子命令。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
