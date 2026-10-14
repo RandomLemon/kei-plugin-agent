@@ -37,10 +37,11 @@ type Plugin struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// writeMu 保护 closing；写穿透与 Stop 用它串行化「是否已进入关闭」的判定。
+	// writeMu 保护 closing/mcpRefreshing；写穿透、刷新与 Stop 用它串行化任务准入。
 	writeMu sync.Mutex
-	// closing 为真表示 Stop 已开始，此后不再接受新的写穿透。
-	closing bool
+	// closing 为真表示 Stop 已开始，此后不再接受新的写穿透或刷新。
+	closing       bool
+	mcpRefreshing bool
 	// writeWG 跟踪在途的写穿透协程：Stop 先等它们结束再取消 p.ctx，
 	// 否则派生自 p.ctx 的写入会被当场取消（持久化后端上会丢数据）。
 	writeWG sync.WaitGroup
@@ -58,6 +59,7 @@ type Plugin struct {
 	now       func() time.Time
 	randFloat func() float64
 	completer completer
+	toolsMu   sync.RWMutex
 	tools     []tool // 当前 MCP 工具目录（mcp.md §13.3）
 	mcp       *mcpClient
 
@@ -142,7 +144,7 @@ func (p *Plugin) Start(ctx context.Context) error {
 			}
 			return err
 		}
-		p.tools = tools
+		p.replaceMCPTools(tools)
 	}
 	return nil
 }

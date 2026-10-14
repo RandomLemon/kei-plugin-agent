@@ -543,6 +543,14 @@ func TestStatusAndPersonaCommands(t *testing.T) {
 	if got := env.command("bogus"); got != personaUsage() {
 		t.Fatalf("unknown = %q", got)
 	}
+	for _, args := range [][]string{{"tools", "bad"}, {"tools", "reload", "extra"}} {
+		if got := env.command(args...); got != personaUsage() {
+			t.Fatalf("非法参数 %v: %q", args, got)
+		}
+	}
+	if got := env.command("tools", "reload"); got != "persona: 未启用 MCP" {
+		t.Fatalf("MCP 禁用: %q", got)
+	}
 	// 覆盖应写穿透到 Storage。
 	key := "persona:override:mock:bot1:g1"
 	deadline := time.Now().Add(time.Second)

@@ -3,19 +3,25 @@ package persona
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/RandomLemon/kei/pkg/bot"
+	"github.com/RandomLemon/kei/pkg/message"
 )
 
 func personaUsage() string {
-	return "用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]]"
+	return "用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
 }
 
 // handleCommand 处理 /persona 管理命令。
 func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) error {
 	if ev.Command == nil {
 		return nil
+	}
+	// 工具命令不需要会话状态，尤其不能在关闭后触发新的懒加载任务。
+	if args := ev.Command.Args; len(args) > 0 && args[0] == "tools" {
+		return p.handleToolsCommand(ctx, bot.TargetFromEvent(ev), r, args[1:])
 	}
 	st := p.stateFor(ev)
 	args := ev.Command.Args
@@ -89,6 +95,81 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 		}
 	default:
 		return r.Text(personaUsage()).Send(ctx)
+	}
+}
+
+func (p *Plugin) handleToolsCommand(ctx context.Context, target bot.Target, r bot.Reply, args []string) error {
+	if len(args) == 0 {
+		p.toolsMu.RLock()
+		names := make([]string, len(p.tools))
+		for i, t := range p.tools {
+			names[i] = t.Def().Function.Name
+		}
+		p.toolsMu.RUnlock()
+		return r.Text("persona: tools=[" + strings.Join(names, " ") + "]").Send(ctx)
+	}
+	if len(args) != 1 || args[0] != "reload" {
+		return r.Text(personaUsage()).Send(ctx)
+	}
+
+	p.writeMu.Lock()
+	var reply string
+	switch {
+	case p.closing:
+		reply = "persona: 插件正在关闭，无法刷新 MCP 工具"
+	case p.mcp == nil:
+		reply = "persona: 未启用 MCP"
+	case p.mcpRefreshing:
+		reply = "persona: MCP 工具正在刷新"
+	default:
+		p.mcpRefreshing = true
+		p.wg.Add(1)
+	}
+	p.writeMu.Unlock()
+	if reply != "" {
+		return r.Text(reply).Send(ctx)
+	}
+	go p.reloadMCPTools(target)
+	return r.Text("persona: 开始刷新 MCP 工具").Send(ctx)
+}
+
+// reloadMCPTools 只捕获发送目标的值；加载与通知分别使用插件级 ctx 的独立预算。
+func (p *Plugin) reloadMCPTools(target bot.Target) {
+	defer p.wg.Done()
+	defer func() {
+		p.writeMu.Lock()
+		p.mcpRefreshing = false
+		p.writeMu.Unlock()
+	}()
+	tools, err := p.loadMCPTools(p.ctx)
+	p.writeMu.Lock()
+	if p.closing {
+		p.writeMu.Unlock()
+		return
+	}
+	if err == nil {
+		p.replaceMCPTools(tools)
+	}
+	p.writeMu.Unlock()
+
+	text := fmt.Sprintf("persona: MCP 工具刷新成功，工具 %d 个", len(tools))
+	if err != nil {
+		text = "persona: MCP 工具刷新失败：" + err.Error()
+		p.log.Warn("persona: MCP 工具刷新失败", "operation", "mcp_reload", "success", false, "tool_count", len(tools), "err", err)
+	} else {
+		p.log.Info("persona: MCP 工具刷新成功", "operation", "mcp_reload", "success", true, "tool_count", len(tools))
+	}
+	if p.ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, p.cfg.mcpTimeout)
+	defer cancel()
+	msg := message.Group(message.Text(text))
+	if target.Kind == bot.MessagePrivate {
+		msg = message.Private(message.Text(text))
+	}
+	if _, err := p.api.Send(ctx, target, msg); err != nil {
+		p.log.Warn("persona: MCP 刷新通知发送失败", "operation", "mcp_reload", "err", err)
 	}
 }
 

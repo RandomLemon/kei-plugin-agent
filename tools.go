@@ -32,6 +32,8 @@ type toolResult struct {
 
 // toolsFor 返回人格可用的工具：不写 tools 时继承全部已装配工具，否则按名单过滤，保持装配顺序。
 func (p *Plugin) toolsFor(personaName string) []tool {
+	p.toolsMu.RLock()
+	defer p.toolsMu.RUnlock()
 	pf := p.cfg.personas[personaName]
 	if !pf.hasTools {
 		return append([]tool(nil), p.tools...)
@@ -43,6 +45,13 @@ func (p *Plugin) toolsFor(personaName string) []tool {
 		}
 	}
 	return out
+}
+
+// replaceMCPTools 整体发布已校验的目录；发布后不再修改切片或其中的工具定义。
+func (p *Plugin) replaceMCPTools(remote []tool) {
+	p.toolsMu.Lock()
+	p.tools = remote
+	p.toolsMu.Unlock()
 }
 
 // completeWithTools 执行一轮生成：人格无可用工具时只调一次 Complete；

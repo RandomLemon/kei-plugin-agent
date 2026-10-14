@@ -31,6 +31,10 @@ type mcpStub struct {
 	callEntered     chan struct{}
 	callRelease     chan struct{}
 	callCanceled    chan struct{}
+	failNextPage    bool
+	listEntered     chan struct{}
+	listRelease     chan struct{}
+	listCanceled    chan struct{}
 }
 
 func testMCPDef(name string) mcpToolDef {
@@ -66,6 +70,7 @@ func (s *mcpStub) serve(w http.ResponseWriter, r *http.Request) {
 	s.records = append(s.records, mcpRecorded{message: msg, headers: r.Header.Clone()})
 	defs := append([]mcpToolDef{}, s.defs...)
 	call404, entered, release, canceled := s.call404, s.callEntered, s.callRelease, s.callCanceled
+	failNextPage, listEntered, listRelease, listCanceled := s.failNextPage, s.listEntered, s.listRelease, s.listCanceled
 	if msg.Method == "initialize" {
 		s.initializations++
 	}
@@ -97,6 +102,24 @@ func (s *mcpStub) serve(w http.ResponseWriter, r *http.Request) {
 			Cursor string `json:"cursor"`
 		}
 		_ = json.Unmarshal(msg.Params, &params)
+		if params.Cursor == "" && listEntered != nil {
+			select {
+			case listEntered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-listRelease:
+			case <-r.Context().Done():
+				if listCanceled != nil {
+					close(listCanceled)
+				}
+				return
+			}
+		}
+		if params.Cursor != "" && failNextPage {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if params.Cursor == "" && len(defs) > 1 {
 			result = map[string]any{"tools": defs[:1], "nextCursor": "next"}
 		} else if params.Cursor != "" {
@@ -156,6 +179,12 @@ func (s *mcpStub) recorded() []mcpRecorded {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]mcpRecorded(nil), s.records...)
+}
+
+func (s *mcpStub) setDirectory(defs []mcpToolDef, failNextPage bool) {
+	s.mu.Lock()
+	s.defs, s.failNextPage = defs, failNextPage
+	s.mu.Unlock()
 }
 
 func (s *mcpStub) counts() (initializations, calls, deletes int) {
@@ -305,4 +334,190 @@ func TestMCPStopCancelsCall(t *testing.T) {
 	if len(comp.requests()) != 1 || env.fake.count() != 0 {
 		t.Fatal("取消后仍继续生成或发送")
 	}
+}
+
+// waitMCPRefresh 等完成通知及刷新标记清除，不依赖估算网络耗时。
+func waitMCPRefresh(t *testing.T, env *testEnv, sends int) {
+	t.Helper()
+	if !env.waitSends(sends, 2*time.Second) {
+		t.Fatal("未收到刷新完成通知")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		env.p.writeMu.Lock()
+		refreshing := env.p.mcpRefreshing
+		env.p.writeMu.Unlock()
+		if !refreshing {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("刷新任务未退出")
+}
+
+func TestMCPDirectoryReload(t *testing.T) {
+	s := newMCPStub(t, false)
+	comp := &stubCompleter{fn: func(n int) (completionResult, error) {
+		switch n {
+		case 0:
+			return completionResult{ToolCalls: callsOf(stubToolName)}, nil
+		case 1:
+			return completionResult{Content: "原工具回复"}, nil
+		case 2:
+			return completionResult{ToolCalls: callsOf("mcp__get_weather")}, nil
+		case 3:
+			return completionResult{Content: "新工具回复"}, nil
+		default:
+			return completionResult{Content: "普通回复"}, nil
+		}
+	}}
+	env := newMCPEnv(t, s, comp)
+	env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
+	_ = env.deliver(atEvent("g1", "u1", "张三", "先查询"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("初始工具未回复")
+	}
+	env.p.wg.Wait()
+	beforeList := len(s.recorded())
+	if got := env.command("tools"); got != "persona: tools=[mcp__extra mcp__search]" || len(s.recorded()) != beforeList {
+		t.Fatalf("目录展示应只读本地: %q", got)
+	}
+
+	changed := testMCPDef("extra")
+	changed.InputSchema = json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)
+	s.setDirectory([]mcpToolDef{testMCPDef("get_weather"), changed}, false)
+	if got := env.privateCommand("u9", "tools", "reload"); got != "persona: 开始刷新 MCP 工具" {
+		t.Fatal(got)
+	}
+	waitMCPRefresh(t, env, 2)
+	if sent := env.fake.at(1); sent.Target.Kind != "private" || sent.Target.UserID != "u9" || sent.Target.BotID != "bot1" || sent.Msg.Kind != "private" {
+		t.Fatalf("私聊通知目标 = %+v", sent)
+	}
+	if env.fake.texts()[1] != "persona: MCP 工具刷新成功，工具 2 个" {
+		t.Fatal(env.fake.texts())
+	}
+	_ = env.deliver(atEvent("g1", "u1", "张三", "再查询"))
+	if !env.waitSends(3, 2*time.Second) {
+		t.Fatal("新工具未回复")
+	}
+	env.p.wg.Wait()
+	reqs := comp.requests()
+	if defs := reqs[2].Tools; len(defs) != 2 || defs[1].Function.Name != "mcp__get_weather" || string(defs[0].Function.Parameters) != string(changed.InputSchema) {
+		t.Fatalf("更新后的定义 = %+v", defs)
+	}
+	last := s.recorded()
+	var call struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(last[len(last)-1].message.Params, &call)
+	if call.Name != "get_weather" || env.fake.texts()[2] != "新工具回复" {
+		t.Fatal("未实际调用新增工具并发送回复")
+	}
+
+	old := env.p.toolsFor("default")
+	s.setDirectory([]mcpToolDef{testMCPDef("future"), changed}, true)
+	if got := env.command("tools", "reload"); got != "persona: 开始刷新 MCP 工具" {
+		t.Fatal(got)
+	}
+	waitMCPRefresh(t, env, 4)
+	if env.fake.texts()[3] != "persona: MCP 工具刷新失败：MCP 请求失败：http_500" || !reflect.DeepEqual(old, env.p.toolsFor("default")) {
+		t.Fatal("分页失败未报告或覆盖了旧目录")
+	}
+
+	s.setDirectory(nil, false)
+	if got := env.command("tools", "reload"); got != "persona: 开始刷新 MCP 工具" {
+		t.Fatal(got)
+	}
+	waitMCPRefresh(t, env, 5)
+	if env.command("tools") != "persona: tools=[]" || env.fake.texts()[4] != "persona: MCP 工具刷新成功，工具 0 个" {
+		t.Fatal("空目录未发布")
+	}
+	_ = env.deliver(atEvent("g1", "u1", "张三", "普通聊天"))
+	if !env.waitSends(6, 2*time.Second) {
+		t.Fatal("空目录后未回复")
+	}
+	if len(comp.requests()[4].Tools) != 0 || env.fake.texts()[5] != "普通回复" {
+		t.Fatal("空目录后仍发送工具定义")
+	}
+}
+
+func TestMCPReloadSnapshotAndStop(t *testing.T) {
+	t.Run("生成固定快照", func(t *testing.T) {
+		s := newMCPStub(t, false)
+		s.callEntered, s.callRelease = make(chan struct{}, 1), make(chan struct{})
+		comp := &stubCompleter{fn: func(n int) (completionResult, error) {
+			if n%2 == 0 {
+				return completionResult{ToolCalls: callsOf(stubToolName)}, nil
+			}
+			return completionResult{Content: fmt.Sprintf("回复%d", n)}, nil
+		}}
+		env := newMCPEnv(t, s, comp)
+		env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
+		_ = env.deliver(atEvent("g1", "u1", "张三", "第一次"))
+		awaitMCP(t, s.callEntered)
+		changed := testMCPDef("search")
+		changed.InputSchema = json.RawMessage(`{"type":"object","properties":{"lang":{"type":"string"}}}`)
+		s.setDirectory([]mcpToolDef{changed, testMCPDef("extra")}, false)
+		if got := env.command("tools", "reload"); got != "persona: 开始刷新 MCP 工具" {
+			t.Fatal(got)
+		}
+		waitMCPRefresh(t, env, 1)
+		close(s.callRelease)
+		if !env.waitSends(2, 2*time.Second) {
+			t.Fatal("旧生成未完成")
+		}
+		env.p.wg.Wait()
+		if defs := comp.requests()[1].Tools; string(defs[1].Function.Parameters) != string(testMCPDef("search").InputSchema) {
+			t.Fatal("当前生成的定义被刷新改写")
+		}
+		_ = env.deliver(atEvent("g1", "u1", "张三", "第二次"))
+		if !env.waitSends(3, 2*time.Second) {
+			t.Fatal("新生成未完成")
+		}
+		if defs := comp.requests()[2].Tools; string(defs[1].Function.Parameters) != string(changed.InputSchema) {
+			t.Fatal("下一次生成未使用新定义")
+		}
+	})
+	t.Run("刷新准入与关闭", func(t *testing.T) {
+		s := newMCPStub(t, false)
+		env := newMCPEnv(t, s, &stubCompleter{})
+		old := env.p.toolsFor("default")
+		s.mu.Lock()
+		s.defs = []mcpToolDef{testMCPDef("future")}
+		s.listEntered, s.listRelease, s.listCanceled = make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+		s.mu.Unlock()
+		replies := make(chan string, 1)
+		go func() { replies <- env.command("tools", "reload") }()
+		select {
+		case got := <-replies:
+			if got != "persona: 开始刷新 MCP 工具" {
+				t.Fatal(got)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("reload Handler 被网络阻塞")
+		}
+		awaitMCP(t, s.listEntered)
+		before := len(s.recorded())
+		if got := env.command("tools", "reload"); got != "persona: MCP 工具正在刷新" || len(s.recorded()) != before {
+			t.Fatalf("重复刷新被准入: %q", got)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if err := env.p.Stop(t.Context()); err != nil {
+				t.Error(err)
+			}
+		}()
+		awaitMCP(t, done)
+		awaitMCP(t, s.listCanceled)
+		if got := env.command("tools", "reload"); got != "persona: 插件正在关闭，无法刷新 MCP 工具" {
+			t.Fatal(got)
+		}
+		if !reflect.DeepEqual(old, env.p.toolsFor("default")) || env.fake.count() != 0 {
+			t.Fatal("关闭后发布了目录或发送了完成通知")
+		}
+		if _, _, deletes := s.counts(); deletes != 1 {
+			t.Fatalf("session 未清理: %d", deletes)
+		}
+	})
 }

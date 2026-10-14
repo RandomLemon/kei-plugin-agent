@@ -82,7 +82,7 @@ func newToolEnv(t *testing.T, comp *stubCompleter, tools []tool, mutate func(map
 		}
 	})
 	env.p.completer = comp
-	env.p.tools = tools
+	env.p.replaceMCPTools(tools)
 	return env
 }
 

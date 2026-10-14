@@ -124,7 +124,7 @@ reg.OnCommand("persona", p.handleCommand,
 - 参数非法或缺参回用法文本；`add` 已存在、`del` 不存在均幂等（回同一行，不产生写穿透）。
 - 策略是**插件级**（不是每会话），持久化键 `persona:policy`（[`architecture.md`](architecture.md) §4.4）。
 
-`tools` 的输出行（逐字；动态目录与后台刷新行为见 [`mcp.md`](mcp.md) §14.6，子命令在 P9 接入）：
+`tools` 的输出行（逐字；动态目录与后台刷新行为见 [`mcp.md`](mcp.md) §14.6）：
 
 ```text
 /persona tools                   → persona: tools=[<当前全部工具名，以空格分隔>]

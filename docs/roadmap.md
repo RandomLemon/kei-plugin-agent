@@ -4,7 +4,7 @@
 
 ## 12.1 现状
 
-**P1-P8 已落地；P9 运行时目录刷新尚未实现。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。目录更新暂需重启，尚无 `/persona tools` 子命令。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**P1-P9 已落地。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。管理员通过 `/persona tools` 查看本地目录、`/persona tools reload` 后台刷新；完整加载成功后整体替换，失败保留旧目录，当前生成保持定义与实现快照。端点和凭据修改仍需重启。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
@@ -81,7 +81,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **多模态输入可选**：`llm_vision_enabled=true` 时插件下载最近入站图片（上限 `llm_vision_max_images`，每条消息最多 1 张，单张上限 `llm_vision_max_image_bytes`）并以 base64 内联发送给视觉模型，默认关闭（见 [`llm.md`](llm.md) §9.1）。`llm_vision_allowed_formats` 非空时只发送清单内的格式（跳过清单外格式，不转码）。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
-- **MCP 客户端待实现**：方案见 [`mcp.md`](mcp.md) 第 14 章，第一版为单端点 Streamable HTTP、工具适配与管理员运行时目录刷新；当前仍只有内置工具。
+- **MCP 兼容范围**：单端点 Streamable HTTP，固定协议版本 `2025-11-25`，普通同步工具调用与手动目录刷新；不支持 stdio、OAuth、多端点或自动订阅更新（见 [`mcp.md`](mcp.md) 第 14 章）。
 
 ## 12.4 假设与兜底
 
