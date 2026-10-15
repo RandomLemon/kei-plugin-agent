@@ -67,7 +67,8 @@ type mcpRPCError struct {
 	Message string `json:"message"`
 }
 
-// 错误只携带本地原因码，避免远端错误正文、URL、session 或请求头泄露。
+// 错误只携带本地原因码与出错工具名（后者转义并截断），避免远端错误正文、URL、session
+// 或请求头泄露。
 type mcpError struct{ detail string }
 
 func (e *mcpError) Error() string { return "MCP 请求失败：" + e.detail }
@@ -410,23 +411,32 @@ func validMCPToolName(name string) bool {
 	return true
 }
 
+// toolDetail 把原因码与出错工具名拼成错误细节；远端名按 rune 截断到 64 并转义，
+// 避免超长或带控制字符的名字污染日志与完成通知。
+func toolDetail(reason, name string) string {
+	return reason + ":" + strconv.Quote(truncateRunes(name, 64))
+}
+
 func buildMCPTools(c *mcpClient, defs []mcpToolDef) ([]tool, error) {
 	tools := make([]tool, 0, len(defs))
 	names := make(map[string]bool, len(defs))
 	for _, def := range defs {
 		name := mcpPrefix + def.Name
-		if !validMCPToolName(name) || names[name] {
-			return nil, &mcpError{detail: "bad_tool_name"}
+		if !validMCPToolName(name) {
+			return nil, &mcpError{detail: toolDetail("bad_tool_name", def.Name)}
+		}
+		if names[name] {
+			return nil, &mcpError{detail: toolDetail("duplicate_tool_name", def.Name)}
 		}
 		names[name] = true
 		var schema struct {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(def.InputSchema, &schema) != nil || schema.Type != "object" {
-			return nil, &mcpError{detail: "bad_tool_schema"}
+			return nil, &mcpError{detail: toolDetail("bad_tool_schema", def.Name)}
 		}
 		if def.Execution.TaskSupport == "required" {
-			return nil, &mcpError{detail: "tasks_required"}
+			return nil, &mcpError{detail: toolDetail("tasks_required", def.Name)}
 		}
 		tools = append(tools, &mcpTool{client: c, remoteName: def.Name, definition: toolDef{
 			Type: "function", Function: toolFunction{Name: name, Description: def.Description, Parameters: def.InputSchema},

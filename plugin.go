@@ -136,6 +136,8 @@ func (p *Plugin) Start(ctx context.Context) error {
 	if p.mcp != nil {
 		tools, err := p.loadMCPTools(ctx)
 		if err != nil {
+			p.log.Warn("persona: MCP 工具目录加载失败，启动中止",
+				"operation", "mcp_load", "success", false, "err", err)
 			p.cancel()
 			cleanupCtx, cancel := context.WithTimeout(ctx, p.cfg.mcpTimeout)
 			defer cancel()

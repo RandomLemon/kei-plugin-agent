@@ -176,7 +176,7 @@ plugins:
 
 - `mcp_url` 为空时不构造客户端、不产生 MCP 网络请求，工具目录为空；非空即加载该端点提供的全部工具。无需另加 `mcp_enabled` 或全局工具启用名单。
 - 本地名字为 `mcp__<远端名称>`，调用时使用保存的原始名称；工具目录按本地名称排序。
-- 为适配当前 OpenAI function calling，转换后的名称限定为 1–64 个 ASCII 字母、数字、下划线或连字符。远端名称含点或过长时，目录加载明确报错；第一版不做自动改名或哈希别名。重复名称、非法 `inputSchema`、要求 tasks 的工具也报错，不悄悄隐藏条目。
+- 为适配当前 OpenAI function calling，转换后的名称限定为 1–64 个 ASCII 字母、数字、下划线或连字符。远端名称含点或过长时，目录加载明确报错；第一版不做自动改名或哈希别名。重复名称、非法 `inputSchema`、要求 tasks 的工具也报错，不悄悄隐藏条目。错误细节带出错工具的远端名（转义、按 rune 截断 64）：`bad_tool_name:"x.y"`、`duplicate_tool_name:"x"`、`bad_tool_schema:"x"`、`tasks_required:"x"`；整个目录一次校验，任一条目非法即整体失败，不发布半份目录。
 - `name`、`description`、`inputSchema` 分别转换为 `toolDef.Function.Name`、`Description`、`Parameters`；schema 保留原 JSON 对象，不实现完整 JSON Schema 校验器或 schema 改写器。
 - 人格 `tools` 不写或为 null：继承当前全部工具；`[]`：无工具；名单：取与当前目录的交集，保持装配顺序。
 - 人格名单只接受 `mcp__` 名称，在配置阶段校验名称格式及 `mcp_url` 非空，不要求远端当前存在；不存在时不会暴露给模型。这样可以先配置将来新增的工具，删除远端工具也无需同步修改人格配置。
@@ -244,7 +244,7 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 | 阶段 | 行为 |
 | --- | --- |
 | Setup | 解析配置、构造客户端，工具目录初始为空；不做 MCP 网络操作 |
-| Start | 保存插件级 ctx；配置了 MCP 时，在阶段 ctx 与 `mcp_timeout` 的共同预算内完成初始化和首次目录加载。失败返回 error 阻止启动，与现有配置显式启用能力的原则一致 |
+| Start | 保存插件级 ctx；配置了 MCP 时，在阶段 ctx 与 `mcp_timeout` 的共同预算内完成初始化和首次目录加载。失败时先记一条 `Warn`（`operation=mcp_load`，`err` 里带出错工具名），再清理 session 并返回 error 阻止启动，与现有配置显式启用能力的原则一致 |
 | 运行期 | 工具调用在现有 generate 协程内执行；仅 reload 额外启动一个短期协程 |
 | Stop | 标记关闭后拒绝新刷新；沿用现有取消与等待顺序，取消在途 MCP 请求并等待刷新/生成退出。有 session 时用 Stop 阶段 ctx 加超时发送 DELETE；405 视为服务端不支持显式结束，其余清理错误返回，不重试 |
 
