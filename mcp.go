@@ -224,7 +224,7 @@ func (c *mcpClient) post(ctx context.Context, budget *mcpBudget, msg mcpMessage,
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if msg.ID == nil || msg.Method == "" { // 通知、服务端请求的回复。
 		if resp.StatusCode == http.StatusAccepted {
 			return nil, "", nil
@@ -381,7 +381,7 @@ func (c *mcpClient) close(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != http.StatusMethodNotAllowed {
 		return &mcpError{detail: "http_" + strconv.Itoa(resp.StatusCode)}
 	}
@@ -399,12 +399,17 @@ type mcpTool struct {
 
 func (t *mcpTool) Def() toolDef { return t.definition }
 
+// isMCPToolNameByte 判断字节是否属于工具名字符集（ASCII 字母、数字、下划线、连字符）。
+func isMCPToolNameByte(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-'
+}
+
 func validMCPToolName(name string) bool {
 	if !strings.HasPrefix(name, mcpPrefix) || len(name) <= len(mcpPrefix) || len(name) > 64 {
 		return false
 	}
-	for _, ch := range []byte(name) {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+	for i := range len(name) {
+		if !isMCPToolNameByte(name[i]) {
 			return false
 		}
 	}
