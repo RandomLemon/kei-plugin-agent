@@ -11,8 +11,11 @@ import (
 	"github.com/RandomLemon/kei/pkg/bot"
 )
 
-// policyKey 是插件级名单策略的 Storage 键。
-const policyKey = "persona:policy"
+// policyKey 是插件级名单策略的 Storage 逻辑键。
+//
+// 框架按插件名隔离键空间（底层键为 plugin:persona:policy，见
+// docs/architecture.md §4.4），插件不自己拼插件名前缀。
+const policyKey = "policy"
 
 // scopeGroup / scopePrivate 是 /persona policy|list 的两个作用域。
 const (

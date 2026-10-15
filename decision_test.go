@@ -552,7 +552,7 @@ func TestStatusAndPersonaCommands(t *testing.T) {
 		t.Fatalf("MCP 禁用: %q", got)
 	}
 	// 覆盖应写穿透到 Storage。
-	key := "persona:override:mock:bot1:g1"
+	key := overrideKey("mock:bot1:g1")
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if v, ok := env.store.value(key); ok && v != "" {
@@ -829,7 +829,7 @@ func TestPrivatePeersHaveDistinctKeys(t *testing.T) {
 	if overrideKey(st1.key) == overrideKey(st2.key) {
 		t.Fatalf("私聊对端覆盖键碰撞: %q", overrideKey(st1.key))
 	}
-	if got := overrideKey(st1.key); got != "persona:override:mock:bot1:user:u1" {
+	if got := overrideKey(st1.key); got != "override:mock:bot1:user:u1" {
 		t.Fatalf("覆盖键 = %q", got)
 	}
 	if st1.kind != bot.MessagePrivate || st1.peerUserID != "u1" {

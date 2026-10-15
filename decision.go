@@ -158,7 +158,7 @@ func hasMention(msg *bot.Message, selfIDs []string) bool {
 		if seg.Type != bot.SegAt {
 			continue
 		}
-		id := strOf(seg.Data[bot.KeyUserID])
+		id := bot.SegmentData(seg, bot.KeyUserID)
 		if id == atAllSentinel {
 			continue
 		}
@@ -182,7 +182,7 @@ func (p *Plugin) isReplyToSelf(msg *bot.Message) bool {
 		if seg.Type != bot.SegReply {
 			continue
 		}
-		if p.replyIDs.Has(strOf(seg.Data[bot.KeyMessageID])) {
+		if p.replyIDs.Has(bot.SegmentData(seg, bot.KeyMessageID)) {
 			return true
 		}
 	}

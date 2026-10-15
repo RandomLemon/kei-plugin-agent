@@ -127,10 +127,10 @@ const visionMaxImagesPerTurn = 1
 // imageSegURL 抽取单个图片段的可用 URL：KeyURL 非空即用；
 // 否则仅当 KeyFile 是 http(s) URL 时使用（本地路径/平台文件 ID 对远端 LLM 不可用）。
 func imageSegURL(seg bot.Segment) string {
-	if u := strOf(seg.Data[bot.KeyURL]); u != "" {
+	if u := bot.SegmentData(seg, bot.KeyURL); u != "" {
 		return u
 	}
-	if u := strOf(seg.Data[bot.KeyFile]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+	if u := bot.SegmentData(seg, bot.KeyFile); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
 		return u
 	}
 	return ""
@@ -258,9 +258,9 @@ func renderMessage(msg *bot.Message) (string, []TurnPart) {
 				hasText = true
 			}
 		case bot.SegAt:
-			name := strOf(seg.Data[bot.KeyUserName])
+			name := bot.SegmentData(seg, bot.KeyUserName)
 			if name == "" {
-				name = strOf(seg.Data[bot.KeyUserID])
+				name = bot.SegmentData(seg, bot.KeyUserID)
 			}
 			full.WriteString("@" + name + " ")
 			buf.WriteString("@" + name + " ")

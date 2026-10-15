@@ -327,9 +327,12 @@ func (p *Plugin) evictLocked() {
 	}
 }
 
-// overrideKey 返回会话覆盖的 Storage 键。
+// overrideKey 返回会话覆盖的 Storage 键（逻辑键）。
+//
+// 框架按插件名隔离键空间（底层键再加 plugin:persona: 前缀，见
+// docs/architecture.md §4.4），因此这里不再自带插件名前缀。
 func overrideKey(sessionKey string) string {
-	return "persona:override:" + sessionKey
+	return "override:" + sessionKey
 }
 
 // overrideValue 是覆盖值持久化后的 JSON 形状。
