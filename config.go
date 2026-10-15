@@ -317,6 +317,10 @@ func loadConfig(c *bot.Config) (*config, error) {
 	if err := needMinInt("tools_result_max_chars", cfg.toolsResultMaxChars, 1); err != nil {
 		return nil, err
 	}
+	// 0 会让每次工具调用拿到已过期的 ctx，静默退化成「全部超时」，故必须 > 0。
+	if cfg.toolsCallTimeout <= 0 {
+		return nil, cfgErr("tools_call_timeout", cfg.toolsCallTimeout.String(), "必须 > 0")
+	}
 	for _, d := range []struct {
 		key string
 		val time.Duration
@@ -327,7 +331,6 @@ func loadConfig(c *bot.Config) (*config, error) {
 		{"batch_window", cfg.batchWindow},
 		{"batch_max_window", cfg.batchMaxWindow},
 		{"llm_timeout", cfg.llmTimeout},
-		{"tools_call_timeout", cfg.toolsCallTimeout},
 	} {
 		if err := needMinDur(d.key, d.val); err != nil {
 			return nil, err

@@ -213,7 +213,9 @@ func TestLoadConfigErrors(t *testing.T) {
 		{"tools_result_max_chars 为零", func(c map[string]any) { c["tools_result_max_chars"] = 0 },
 			"persona: 配置错误 tools_result_max_chars=0: 必须 >= 1"},
 		{"tools_call_timeout 为负", func(c map[string]any) { c["tools_call_timeout"] = -1 },
-			"persona: 配置错误 tools_call_timeout=-1s: 必须 >= 0"},
+			"persona: 配置错误 tools_call_timeout=-1s: 必须 > 0"},
+		{"tools_call_timeout 为零", func(c map[string]any) { c["tools_call_timeout"] = "0s" },
+			"persona: 配置错误 tools_call_timeout=0s: 必须 > 0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

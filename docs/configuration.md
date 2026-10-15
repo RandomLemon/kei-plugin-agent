@@ -308,7 +308,7 @@ persona: 配置错误 personas.helper.tools=mcp__search_manual: 未启用 MCP
 | `llm_vision_max_image_bytes` | 必须 >= 1 |
 | `llm_vision_allowed_formats` | 无额外校验；取值口径同 `self_ids`（列表键），元素按 §10.4 注归一 |
 | `tools_max_rounds` | 必须 >= 1 |
-| `tools_call_timeout` | 必须 >= 0 |
+| `tools_call_timeout` | 必须 > 0（0 会让每次工具调用立即超时） |
 | `tools_result_max_chars` | 必须 >= 1 |
 | `mcp_url` | 空表示禁用；非空必须是带 host 的 http(s) URL，凭据放请求头；不自动补路径 |
 | `mcp_extra_headers` | 必须为字符串键值映射；不得覆盖 Content-Type、Accept、MCP-Protocol-Version、MCP-Session-Id，大小写不敏感；错误文案不输出请求头的值 |
