@@ -197,7 +197,7 @@ HTTP/JSON-RPC 必须处理的部分：
 - SSE 中的空事件、注释和通知不当成响应。第一版不使用列表变更通知来自动刷新；对服务端的 `ping` 正常回复，对未支持的请求返回 JSON-RPC method-not-found，不宣告不存在的客户端能力。
 - 不做 HTTP 重试或 SSE 断线续传。响应到达前连接断开，返回调用失败；尤其不能重发可能已经执行的 `tools/call`。
 - 带 session ID 的请求收到 HTTP 404 时，清除失效会话并按协议发起新初始化；同一客户端的重新初始化串行、受当前操作的剩余时间约束。原工具调用返回失败，**不自动重放**。目录通过管理员 reload 重新确认。
-- 管理操作用 `mcp_timeout`；工具调用直接使用循环施加的 `tools_call_timeout`，会话恢复也计入这个预算，不额外叠加超时。所有响应累计读取上限 1 MiB；超限返回错误，不把截断 JSON 当成功结果。
+- 管理操作用 `mcp_timeout`；工具调用直接使用循环施加的 `tools_call_timeout`，会话恢复也计入这个预算，不额外叠加超时。单次操作内所有响应（含初始化与分页）累计读取上限 1 MiB：超限返回 `response_too_large`，不把截断 JSON 当成功结果，目录总量超过该上限的服务端按加载失败处理而不是继续累积内存。
 - `mcp_extra_headers` 不得覆盖 Content-Type、Accept、MCP-Protocol-Version 和 MCP-Session-Id（大小写不敏感）。凭据和 session ID 不进日志，不复用图片下载客户端。
 
 固定协议版本、同步调用、结果类型和命名限制是第一版的兼容范围；接入前需确认服务端满足这些要求。

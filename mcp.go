@@ -22,6 +22,25 @@ const (
 	mcpMaxResponse = 1 << 20
 )
 
+// mcpBudget 是一次 MCP 操作（初始化、一次完整目录遍历或一次工具调用）内全部响应共享的
+// 读取预算：分页与服务端请求的回复都要计入，否则内存会随分页次数无上限增长
+// （mcp.md §14.4）。操作内部串行使用，无需加锁。
+type mcpBudget struct{ left int64 }
+
+// newMCPBudget 返回一次操作的读取预算。
+func newMCPBudget() *mcpBudget { return &mcpBudget{left: mcpMaxResponse} }
+
+// next 返回本次响应允许读取的字节数；预算用尽时返回 0。
+func (b *mcpBudget) next() int64 {
+	if b.left <= 0 {
+		return 0
+	}
+	return min(b.left, int64(mcpMaxResponse))
+}
+
+// spend 记账本次响应实际读取的字节数（含 SSE 帧与未消费的剩余字节）。
+func (b *mcpBudget) spend(n int64) { b.left -= n }
+
 // mcpClient 只有初始化串行；普通请求可以并发，网络操作不持有状态锁。
 type mcpClient struct {
 	url       string
@@ -81,7 +100,7 @@ func (c *mcpClient) session() string {
 	return c.sessionID
 }
 
-func (c *mcpClient) initialize(ctx context.Context) error {
+func (c *mcpClient) initialize(ctx context.Context, budget *mcpBudget) error {
 	select {
 	case c.initGate <- struct{}{}:
 		defer func() { <-c.initGate }()
@@ -102,7 +121,7 @@ func (c *mcpClient) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	result, session, err := c.post(ctx, mcpMessage{JSONRPC: "2.0", ID: c.nextID(), Method: "initialize", Params: params}, "")
+	result, session, err := c.post(ctx, budget, mcpMessage{JSONRPC: "2.0", ID: c.nextID(), Method: "initialize", Params: params}, "")
 	// 即使初始化内容校验失败，也保留已建立的 session，供启动失败时清理。
 	c.mu.Lock()
 	c.sessionID = session
@@ -119,7 +138,7 @@ func (c *mcpClient) initialize(ctx context.Context) error {
 	if json.Unmarshal(result, &info) != nil || info.ProtocolVersion != mcpVersion || info.Capabilities.Tools == nil {
 		return &mcpError{detail: "bad_initialize"}
 	}
-	if _, _, err := c.post(ctx, mcpMessage{JSONRPC: "2.0", Method: "notifications/initialized"}, session); err != nil {
+	if _, _, err := c.post(ctx, budget, mcpMessage{JSONRPC: "2.0", Method: "notifications/initialized"}, session); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -132,8 +151,8 @@ func (c *mcpClient) nextID() json.RawMessage {
 	return json.RawMessage(strconv.FormatUint(c.seq.Add(1), 10))
 }
 
-func (c *mcpClient) request(ctx context.Context, method string, params any, out any) error {
-	if err := c.initialize(ctx); err != nil {
+func (c *mcpClient) request(ctx context.Context, budget *mcpBudget, method string, params any, out any) error {
+	if err := c.initialize(ctx, budget); err != nil {
 		return err
 	}
 	data, err := json.Marshal(params)
@@ -141,7 +160,7 @@ func (c *mcpClient) request(ctx context.Context, method string, params any, out 
 		return err
 	}
 	session := c.session()
-	result, _, err := c.post(ctx, mcpMessage{JSONRPC: "2.0", ID: c.nextID(), Method: method, Params: data}, session)
+	result, _, err := c.post(ctx, budget, mcpMessage{JSONRPC: "2.0", ID: c.nextID(), Method: method, Params: data}, session)
 	var failure *mcpError
 	if errors.As(err, &failure) && failure.detail == "http_404" && session != "" {
 		c.mu.Lock()
@@ -150,7 +169,7 @@ func (c *mcpClient) request(ctx context.Context, method string, params any, out 
 		}
 		c.mu.Unlock()
 		// 恢复会话供后续操作使用；原请求始终返回失败，绝不重放。
-		if initErr := c.initialize(ctx); initErr != nil {
+		if initErr := c.initialize(ctx, budget); initErr != nil {
 			return initErr
 		}
 	}
@@ -191,7 +210,7 @@ func (c *mcpClient) do(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func (c *mcpClient) post(ctx context.Context, msg mcpMessage, session string) (json.RawMessage, string, error) {
+func (c *mcpClient) post(ctx context.Context, budget *mcpBudget, msg mcpMessage, session string) (json.RawMessage, string, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, "", err
@@ -222,7 +241,12 @@ func (c *mcpClient) post(ctx context.Context, msg mcpMessage, session string) (j
 	if err != nil {
 		return nil, responseSession, &mcpError{detail: "bad_content_type"}
 	}
-	reader := &io.LimitedReader{R: resp.Body, N: mcpMaxResponse + 1}
+	limit := budget.next()
+	if limit <= 0 {
+		return nil, responseSession, &mcpError{detail: "response_too_large"}
+	}
+	reader := &io.LimitedReader{R: resp.Body, N: limit + 1}
+	defer func() { budget.spend(limit + 1 - reader.N) }()
 	var result json.RawMessage
 	switch media {
 	case "application/json":
@@ -230,23 +254,23 @@ func (c *mcpClient) post(ctx context.Context, msg mcpMessage, session string) (j
 		if readErr != nil {
 			return nil, responseSession, &mcpError{detail: "read_response"}
 		}
-		if len(body) > mcpMaxResponse {
+		if int64(len(body)) > limit {
 			return nil, responseSession, &mcpError{detail: "response_too_large"}
 		}
 		var done bool
-		result, done, err = c.receive(ctx, body, msg.ID, session)
+		result, done, err = c.receive(ctx, budget, body, msg.ID, session)
 		if err == nil && !done {
 			err = &mcpError{detail: "missing_response"}
 		}
 	case "text/event-stream":
-		result, err = c.readSSE(ctx, reader, msg.ID, session)
+		result, err = c.readSSE(ctx, budget, reader, msg.ID, session)
 	default:
 		err = &mcpError{detail: "bad_content_type"}
 	}
 	return result, responseSession, err
 }
 
-func (c *mcpClient) readSSE(ctx context.Context, reader *io.LimitedReader, id json.RawMessage, session string) (json.RawMessage, error) {
+func (c *mcpClient) readSSE(ctx context.Context, budget *mcpBudget, reader *io.LimitedReader, id json.RawMessage, session string) (json.RawMessage, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), mcpMaxResponse+1)
 	var data []string
@@ -259,7 +283,7 @@ func (c *mcpClient) readSSE(ctx context.Context, reader *io.LimitedReader, id js
 			if len(data) == 0 {
 				continue
 			}
-			result, done, err := c.receive(ctx, []byte(strings.Join(data, "\n")), id, session)
+			result, done, err := c.receive(ctx, budget, []byte(strings.Join(data, "\n")), id, session)
 			data = nil
 			if err != nil || done {
 				return result, err
@@ -277,7 +301,7 @@ func (c *mcpClient) readSSE(ctx context.Context, reader *io.LimitedReader, id js
 	return nil, &mcpError{detail: "incomplete_stream"}
 }
 
-func (c *mcpClient) receive(ctx context.Context, data []byte, id json.RawMessage, session string) (json.RawMessage, bool, error) {
+func (c *mcpClient) receive(ctx context.Context, budget *mcpBudget, data []byte, id json.RawMessage, session string) (json.RawMessage, bool, error) {
 	var msg mcpMessage
 	if json.Unmarshal(data, &msg) != nil || msg.JSONRPC != "2.0" {
 		return nil, false, &mcpError{detail: "bad_response"}
@@ -291,7 +315,7 @@ func (c *mcpClient) receive(ctx context.Context, data []byte, id json.RawMessage
 			reply.Result = nil
 			reply.Error = &mcpRPCError{Code: -32601, Message: "Method not found"}
 		}
-		_, _, err := c.post(ctx, reply, session)
+		_, _, err := c.post(ctx, budget, reply, session)
 		return nil, false, err
 	}
 	if !bytes.Equal(bytes.TrimSpace(msg.ID), id) || (msg.Result == nil) == (msg.Error == nil) {
@@ -304,6 +328,7 @@ func (c *mcpClient) receive(ctx context.Context, data []byte, id json.RawMessage
 }
 
 func (c *mcpClient) listTools(ctx context.Context) ([]mcpToolDef, error) {
+	budget := newMCPBudget()
 	var tools []mcpToolDef
 	cursor := ""
 	for {
@@ -315,7 +340,7 @@ func (c *mcpClient) listTools(ctx context.Context) ([]mcpToolDef, error) {
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		if err := c.request(ctx, "tools/list", params, &page); err != nil {
+		if err := c.request(ctx, budget, "tools/list", params, &page); err != nil {
 			return nil, err
 		}
 		if page.Tools == nil {
@@ -330,8 +355,9 @@ func (c *mcpClient) listTools(ctx context.Context) ([]mcpToolDef, error) {
 }
 
 func (c *mcpClient) callTool(ctx context.Context, name string, args json.RawMessage) (mcpCallResult, error) {
+	budget := newMCPBudget()
 	var result mcpCallResult
-	err := c.request(ctx, "tools/call", map[string]any{"name": name, "arguments": args}, &result)
+	err := c.request(ctx, budget, "tools/call", map[string]any{"name": name, "arguments": args}, &result)
 	return result, err
 }
 
