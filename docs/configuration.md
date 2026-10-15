@@ -189,6 +189,8 @@ kei 的规则（`internal/config/env.go` `applyPluginEnv`/`setSetting`）：
 - `-` 与 `.` 与 `_` 等价、大小写不敏感（`canonicalName` 规范化）。
 - 环境变量名按 `_` 切分后逐段规范化，因此 `KEI_PLUGINS_PERSONA_LLM_API_KEY` 映射到顶层键 `llm_api_key`（而不是嵌套的 `llm.api.key`）。
 - 只有配置中已存在的插件名才会被命中。
+- 空值（或纯空白）环境变量被忽略：`KEI_PLUGINS_PERSONA_LLM_API_KEY=` 不会清空 YAML 里的键（`systemd`/compose 里「未设置即传空串」的写法因此安全）。
+- 宿主 YAML 里同一段内**重复键**是启动错误（如 `plugins.persona` 下写两遍 `llm_model`），不再「后者覆盖前者」；`plugins.<name>` 的名字只允许 `[a-z0-9_-]`。
 
 **本插件全部采用扁平 `snake_case` 键**，正是为了让上述扁平键映射能命中每一个配置项。
 
@@ -230,7 +232,7 @@ export KEI_PLUGINS_PERSONA_MCP_EXTRA_HEADERS='{"Authorization": "Bearer replace-
 msg=环境变量覆盖配置 env=KEI_PLUGINS_PERSONA_SELF_IDS config=plugins.persona.settings.self_ids value=123456
 ```
 
-缺少该行说明未命中——最常见原因是配置里根本没有 `plugins.persona` 这个键（见上条规则）。
+缺少该行说明未命中——最常见原因是配置里根本没有 `plugins.persona` 这个键（见上条规则）。凭据类变量（名字含 `SECRET`/`TOKEN`/`PASS`/`CREDENTIAL`/`API_KEY`/`DSN` 等）或值本身像凭据时输出 `value=******`，故 `KEI_PLUGINS_PERSONA_LLM_API_KEY` 的覆盖行看不到明文。
 
 ## 10.4 校验规则
 

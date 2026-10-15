@@ -103,7 +103,7 @@ reg.OnCommand("persona", p.handleCommand,
 | `tools reload` | 后台刷新 MCP 工具目录；Handler 立即回复，完成后另发结果（[`mcp.md`](mcp.md) §14.6） |
 | 未知子命令 | 回用法文本 |
 
-命令的即时回复用注入的 `Reply`；命令**不做 LLM 调用、不进历史**。`tools reload` 的后续结果由插件级 ctx 驱动的后台任务通过 `BotAPI.Send` 发送，不能使用已返回 Handler 的 ctx/Reply。
+命令的即时回复用注入的 `Reply`（核心会自动在回复首位加引用触发消息的 `SegReply` 段，支持引用的平台因此显示为「回复某条消息」；`bot.NewNoopReply` 不加引用，测试里断言的是纯文本）。命令**不做 LLM 调用、不进历史**。`tools reload` 的后续结果由插件级 ctx 驱动的后台任务通过 `BotAPI.Send` 发送，不能使用已返回 Handler 的 ctx/Reply。
 
 用法文本（逐字）：
 
@@ -122,7 +122,7 @@ reg.OnCommand("persona", p.handleCommand,
 
 - 这两个子命令同样只走 `bot.WithAdmin()`（仅管理员），不做 LLM 调用、不进历史。
 - 参数非法或缺参回用法文本；`add` 已存在、`del` 不存在均幂等（回同一行，不产生写穿透）。
-- 策略是**插件级**（不是每会话），持久化键 `persona:policy`（[`architecture.md`](architecture.md) §4.4）。
+- 策略是**插件级**（不是每会话），持久化键 `policy`（底层键 `plugin:persona:policy`，[`architecture.md`](architecture.md) §4.4）。
 
 `tools` 的输出行（逐字；动态目录与后台刷新行为见 [`mcp.md`](mcp.md) §14.6）：
 

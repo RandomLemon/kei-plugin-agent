@@ -103,7 +103,7 @@ addressed = 私聊 || mention || reply_to_self || keyword
   最后调用 `p.api.Send(p.ctx, target, msg)`。需要 `send_message` 权限（已在 `Metadata` 声明）。
 - **At 段仅群聊**：`reply_mention_sender=true` 且本轮触发是寻址消息时，在文本段前插入 `message.At(发送者 ID)`；私聊不插入（@ 自己无意义）。
 - **成功后**：回写历史（`Self=true` 的 `Turn`）、把 `MessageID` 记入 ID 环、更新 `lastReplyAt`、`replyTimes` 追加、`replies++`。
-- **失败**：只记 `Warn`（核心自带重试），**不重排、不重发**，reason `send_error`。
+- **失败**：只记 `Warn`，**不重排、不重发**，reason `send_error`。核心的退避重试默认关闭（`engine.send_retries` 默认 0，见 [`architecture.md`](architecture.md) §6），宿主不显式配置就只有一次尝试。
 
 ## 7.6 决策伪代码
 
@@ -353,6 +353,6 @@ decision=reply|skip reason=<token> channel=<key> sender=<id>
 - ID 以**单空格**分隔；空名单渲染为 `[]`。
 - 只有真正发生变更时才写穿透；重复设置同一模式、`add` 已存在、`del` 不存在都不产生 `Storage.Set`。
 
-**持久化**：键 `persona:policy`，值 JSON 形状见 [`architecture.md`](architecture.md) §4.4。`Start` 阶段同步读一次（1s 超时，失败只 `Warn` 并保留配置默认值）；写穿透异步（1s 超时，失败只 `Warn`）。逐字段覆盖：模式为空或非法不覆盖，列表为 `null`/缺键不覆盖、为 `[]` 则覆盖为空名单。
+**持久化**：键 `policy`（底层键 `plugin:persona:policy`），值 JSON 形状见 [`architecture.md`](architecture.md) §4.4。`Start` 阶段同步读一次（1s 超时，失败只 `Warn` 并保留配置默认值）；写穿透异步（1s 超时，失败只 `Warn`）。逐字段覆盖：模式为空或非法不覆盖，列表为 `null`/缺键不覆盖、为 `[]` 则覆盖为空名单。
 
 **下限保护**：`allowByMode` 对未知模式字符串返回「放行」。配置层与 Storage 层都已过滤非法模式，这个分支只在坏数据绕过两层校验时兜底——宁可多说话，也不要因为一条坏数据把机器人永久静默。

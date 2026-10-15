@@ -41,7 +41,7 @@ go test -race ./...
 | 两个私聊对端（`u1`/`u2`） | 会话键 `mock:bot1:user:<id>` 与覆盖键互不相同 |
 | `persona:private` 规则注册 | 规则存在、`EventType=EventMessage`、`Kind=MessagePrivate` |
 | `/persona policy`、`/persona list`（含 `add`/`del`/缺参/非法 scope/mode） | 输出行字面量一致；`add` 已存在、`del` 不存在幂等；非法参数回用法文本 |
-| 策略写穿透 | `Storage` 键 `persona:policy` 值含新模式/名单 |
+| 策略写穿透 | `Storage` 键 `policy` 值含新模式/名单 |
 | `Start` 恢复策略（合法 / 非法模式 / `null` 列表 / `[]` 列表 / 坏 JSON / 无覆盖） | 合法值生效；非法模式与 `null` 列表回落配置默认值；`[]` 采用空名单；坏 JSON 不 panic 且回落默认值 |
 | 机器人发送者且 `ignore_bots=true` | 决策结果 `reason=bot_sender` |
 | 命令消息且 `respond_to_commands=false` | 决策结果 `reason=command` |
@@ -159,7 +159,7 @@ func main() {
 
 为稳定复现，配置 `random_probability: 1.0`、`mention_min_interval: 0s`、`random_cooldown: 0s`。
 
-「重启后仍保留」这类断言需要持久化后端：kei 的默认 `storage.type: memory` 随进程消失，把宿主的 `storage: {type: sqlite, dsn: <文件路径>}`（或 `mysql`）配上才成立（见 [`architecture.md`](architecture.md) §4.7 与 kei `docs/configuration.md` §12.5）。sqlite 驱动经 cgo 编译，宿主构建需 `CGO_ENABLED=1` 与可用的 C 编译器（kei 的 devShell 已含 `gcc`）。想在同一进程里重复 `kei.Run` 模拟重启时，用 `kei.Options.Plugins: []bot.Plugin{&persona.Plugin{}}` 注入干净实例（与配置里的 `plugins.persona` 同名时注入优先，见 [`architecture.md`](architecture.md) 第 6 章）。
+「重启后仍保留」这类断言需要持久化后端：kei 的默认 `storage.type: memory` 随进程消失，把宿主的 `storage: {type: sqlite, dsn: <文件路径>}`（或 `mysql`）配上才成立（见 [`architecture.md`](architecture.md) §4.7 与 kei `docs/configuration.md` §12.5）。SQL 方言是显式 opt-in：宿主 main 必须加 `_ "github.com/RandomLemon/kei/pkg/kei/sql"`（`cmd/bot` 已加），否则装配期报未知存储类型。sqlite 驱动经 cgo 编译，宿主构建需 `CGO_ENABLED=1` 与可用的 C 编译器（kei 的 devShell 已含 `gcc`）。想在同一进程里重复 `kei.Run` 模拟重启时，用 `kei.Options.Plugins: []bot.Plugin{&persona.Plugin{}}` 注入干净实例（与配置里的 `plugins.persona` 同名时注入优先，见 [`architecture.md`](architecture.md) 第 6 章）。
 
 LLM 侧用**本地桩服务**（`python3 -m http.server` 不够，它不会返回 JSON）。20 行以内的桩要点：
 
@@ -198,9 +198,9 @@ PY
 5. 注入 `/persona status`（核心 `auth.admin_users: ["u1"]`）→ 期望输出含 `persona=` 与计数器。
 6. 注入 `/persona off` 后再注入消息 → 期望 `/sent` 不再增长。
 7. 私聊（配置 `private_policy: open`）：注入 `{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三"}` → 期望 `/sent` 增长，且 `Target.Kind=private`、`Target.UserID=u1`、`Target.ChannelID` 为空（`curl -sS 127.0.0.1:18080/sent | jq '.[-1].Request.Target'`）。
-8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/persona policy`、`/persona list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；配了持久化存储后端（见上）时，重启宿主后 `/persona policy` 应显示 `persona:policy` 覆盖值而非配置默认值——默认 memory 后端重启即丢，此时该断言不成立。
+8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/persona policy`、`/persona list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；配了持久化存储后端（见上）时，重启宿主后 `/persona policy` 应显示 `policy` 键（底层键 `plugin:persona:policy`）里的覆盖值而非配置默认值——默认 memory 后端重启即丢，此时该断言不成立。
 
-说明：mock 适配器的 HTTP `/inject` 支持 `kind`（缺省 `group`，可传 `private`；`private` 时不构造 `Channel`）与任意文本，但**无法构造 `bot.SegAt`**。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径覆盖随机插话、命令与私聊（`e2e_test.go` 的 `TestE2EMockAdapterPrivate`）。`/sent` 的每条记录含完整 `Request.Target`，可断言 `Kind`/`ChannelID`/`UserID`（私聊发送 `ChannelID` 为空）。
+说明：mock 适配器的 HTTP `/inject` 支持 `kind`（缺省 `group`；可选 `private`/`channel`，`channel` 构造 `Channel`，`private` 不构造）与任意文本，非法 `kind` 返回 400 且不投递事件；控制面只允许绑定回环地址（非回环需显式开 `allow_remote_control_plane`），插件文档里的 `127.0.0.1:0` 用法不受影响。但 `/inject` **无法构造 `bot.SegAt`**。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径覆盖随机插话、命令与私聊（`e2e_test.go` 的 `TestE2EMockAdapterPrivate`）。`/sent` 的每条记录含完整 `Request.Target`，可断言 `Kind`/`ChannelID`/`UserID`（私聊发送 `ChannelID` 为空）。
 
 ## 11.4 竞态与优雅关闭
 

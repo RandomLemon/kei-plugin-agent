@@ -52,7 +52,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - `bot.WithKind(bot.MessagePrivate)` 私聊规则 `persona:private`：私聊视为寻址、必回（受 `mention_min_interval`/`mention_reply_probability` 约束），不进入随机路径（[`participation.md`](participation.md) §7.2-7.3）。
 - 会话类型贯穿状态与渲染：`channelState.kind`/`peerUserID`、`{{chat_kind}}`（[`persona.md`](persona.md) §8.5）、历史块头 `[群聊记录]`/`[私聊记录]`（§8.6）、私聊发送目标 `message.Private` + `Target{UserID, Kind: MessagePrivate}`（§7.5）。
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
-- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `persona:policy`，`Start` 同步恢复。
+- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `policy` 键，`Start` 同步恢复。
 
 ### P7 工具调用与知识库检索（历史实现）
 
@@ -83,9 +83,12 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
 - **MCP 兼容范围**：单端点 Streamable HTTP，固定协议版本 `2025-11-25`，普通同步工具调用与手动目录刷新；不支持 stdio、OAuth、多端点或自动订阅更新（见 [`mcp.md`](mcp.md) 第 14 章）。单次操作内所有响应累计读取上限 1 MiB，超出即加载失败。
 - **工具循环占用并发名额**：整轮工具调用都在 `generate` 已持有的全局信号量内完成（[`mcp.md`](mcp.md) §13.4），默认上界约 `3×40s + 2×3×8s`；`limits_max_concurrent` 较小时，慢 MCP 端点会让其它会话的生成被丢成 `semaphore_full`。
+- **发送失败不补发**：核心的退避重试默认关闭（`engine.send_retries` 默认 0，只尝试一次），`send_error` 的回复不重排、不重发；需要重试的宿主自行配置该键（[`architecture.md`](architecture.md) §6）。
+- **超长会话键不落库**：Storage 底层键上限 191 字节且含 `plugin:persona:` 前缀，故会话键超过 167 字节时该会话的覆盖/开关无法持久化（只记 `Warn`，聊天本身不受影响），见 [`architecture.md`](architecture.md) §4.4。
+- **配置键拼写无核心告警**：`Metadata.Options` 未声明，拼错的 `plugins.persona.*` 键只被本插件忽略，kei 不记 warn（[`architecture.md`](architecture.md) §6）。
 
 ## 12.4 假设与兜底
 
 - 本次交付同时包含文档与代码（变更流程见 [`README.md`](README.md) 顶部）。
-- 上游 kei 最新 tag 为 `v0.0.2`（`8747420`，早于当前 HEAD `f03daef` 三个提交：pluggable storage 与 `/manage` 命令命名空间）：宿主与本地开发用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）；上游出现更新的可用版本号时替换引用即可，不影响设计。
+- 上游 kei 最新 tag 为 `v0.0.3`（`bb98fa9`，早于当前 HEAD `42c37be` 65 个提交），且**不含**本插件契约依赖的多数行为（storage 键空间隔离、`Reply` 自动引用、`engine.send_retries`、`bot.SegmentData` 等）：宿主与本地开发仍用 `replace github.com/RandomLemon/kei => ../kei` 指向本地检出，`go.mod` 的 `require` 保留 `v0.0.0` 占位；上游发布含这些契约的版本后替换引用即可，不影响设计（契约版本与事实来源见 [`architecture.md`](architecture.md) §6）。
 - 若 `pkg/bot` 在实现期缺少本设计所需 API（例如浮点读取），按 [`llm.md`](llm.md) §9.1 的写法改用 `Get` + 类型断言，不得引入第三方依赖。

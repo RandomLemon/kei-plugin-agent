@@ -17,8 +17,8 @@
 | 名单策略 | 群聊与私聊各一套模式 + 单列表（[§7.8](docs/participation.md)） |
 | 工具调用 | 通过外部 MCP 服务（Streamable HTTP）按人格暴露工具，模型按需调用；目录可在运行时刷新，需 LLM 服务支持 tool calling（[`docs/mcp.md` 第 14 章](docs/mcp.md)） |
 | 管理命令 | `/persona` 系列，仅管理员，不调用 LLM、不进历史（[§8.4](docs/persona.md)） |
-| 持久化 | 每会话的人格覆盖与开关、插件级名单策略写入 `bot.Storage`；历史与计数器只在内存，覆盖与策略的存续取决于宿主存储后端（默认 memory 重启即丢，`storage.type: sqlite`/`mysql` 保留） |
-| 可观测 | 每条消息以 `Debug` 输出决策行（reason 词表见 [§7.7](docs/participation.md)），`/persona status` 汇总计数 |
+| 持久化 | 每会话的人格覆盖与开关、插件级名单策略写入 `bot.Storage`；历史与计数器只在内存，覆盖与策略的存续取决于宿主存储后端（默认 memory 重启即丢，`storage.type: sqlite`/`mysql` 保留；SQL 后端需宿主空导入 `github.com/RandomLemon/kei/pkg/kei/sql`） |
+| 可观测 | 每条消息以 `Debug` 输出决策行（reason 词表见 [§7.7](docs/participation.md)），`/persona status` 汇总计数；宿主核心默认在 `Info` 记录收发消息的完整正文与发送者（`log.level` 控制，插件无法关闭） |
 
 设计口径、边界与非目标见 [`docs/`](docs/README.md)；硬性规则见 [`AGENTS.md`](AGENTS.md)。
 

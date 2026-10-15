@@ -388,7 +388,7 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 3. 在 `commands.go` 增加 `tools` 分支，并更新 `personaUsage`。无参数时在读锁内提取当前**全部**目录名称，不按当前人格过滤，也不调用 `tools/list`；`reload` 为唯一允许的参数，其余回用法文本。输出格式见 [`persona.md`](persona.md) §8.4。沿用现有 `bot.WithAdmin()` 规则，不引入新的权限判断或 LLM 调用。
 4. reload 在 Handler 内复制原会话的 `bot.Target`，按现有 group/private 发送目标构造方式保存字符串 ID 和消息类型。然后在现有 `writeMu` 内检查 `closing`、`mcpRefreshing` 和客户端是否启用；允许刷新时置标记并 `p.wg.Add(1)`，解锁后启动一个协程。即时回复使用现有 `Reply`；关闭、未启用和刷新在途均立即回说明，不排队。锁内不发送消息、不联网。
 5. 协程用 `p.ctx` 调 `loadMCPTools`；成功且未进入关闭时调用 `replaceMCPTools`，失败报告错误。发布前按 `writeMu → toolsMu` 的固定顺序复核关闭状态，避免 Stop 后发布候选目录；读取目录的路径只持 `toolsMu`，不反向获取准入锁。
-6. 刷新操作结束后，完成通知使用从 `p.ctx` **重新派生**的 `mcp_timeout`，通过 `BotAPI.Send` 发回保存的 target；不要用可能已经超时的目录加载 ctx，也不捕获 Handler ctx、Reply 或 Event。消息的 Group/Private 构造沿用 [`decision.go`](../decision.go) 的方式，发送失败只记日志，不再次刷新或重发。Stop 已取消插件 ctx 时不发送完成通知。协程退出时在 `writeMu` 下清除刷新标记，再 `p.wg.Done()`，通知结束前仍视为刷新在途。
+6. 刷新操作结束后，完成通知使用从 `p.ctx` **重新派生**的 `mcp_timeout`，通过 `BotAPI.Send` 发回保存的 target；不要用可能已经超时的目录加载 ctx，也不捕获 Handler ctx 或 `Reply`（它们的生命周期止于 Handler 返回；`*bot.Event` 本身可安全留存，核心入队时已复制，见 [`architecture.md`](architecture.md) §6）。消息的 Group/Private 构造沿用 [`decision.go`](../decision.go) 的方式，发送失败只记日志，不再次刷新或重发。Stop 已取消插件 ctx 时不发送完成通知。协程退出时在 `writeMu` 下清除刷新标记，再 `p.wg.Done()`，通知结束前仍视为刷新在途。
 7. Stop 的关闭判定和刷新 Add 使用同一个准入锁，维持已有取消、等待和 session 清理顺序；不增加独立 WaitGroup、常驻协程或关闭队列。目录刷新日志使用 §14.5 的字段。按下面的验收矩阵完成本阶段测试。
 
 此阶段新增逻辑集中在工具快照、完整替换与一个短期刷新任务。`mcpClient` 的协议实现、`mcpTool`、LLM 请求格式和工具调用循环沿用 P8；没有新的配置键、provider 接口、自动刷新或目录持久化。
