@@ -242,7 +242,7 @@ msg=环境变量覆盖配置 env=KEI_PLUGINS_PERSONA_SELF_IDS config=plugins.per
 persona: 配置错误 <key>=<值>: <原因>
 ```
 
-`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须 <= <n>`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。MCP 配置另使用 `必须是带 host 的 http(s) URL`、`必须是字符串键值映射`、`不得覆盖 MCP 协议请求头`、`必须 > 0`；人格工具名使用 `不是合法 MCP 工具名`、`未启用 MCP`，凭据不作为错误中的 `<值>` 输出。
+`<原因>` 取自固定短语：`不能为空`、`必须是非空对象`、`必须是 0..1 之间的小数`、`必须 >= <n>`、`必须是 HH:MM-HH:MM 格式`、`必须是 off|open|whitelist|blacklist 之一`、`不是合法时区`、`未在 personas 中定义`、`prompt 不能为空`、`channel_id 不能为空`。MCP 配置另使用 `必须是带 host 的 http(s) URL`、`必须是字符串键值映射`、`不得覆盖 MCP 协议请求头`、`必须 > 0`；人格工具名使用 `不是合法 MCP 工具名`、`未启用 MCP`，凭据不作为错误中的 `<值>` 输出。
 
 固定示例：
 

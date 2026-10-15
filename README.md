@@ -15,6 +15,7 @@
 | 人格系统 | `personas` 预设库 + `bindings` 绑定，含运行时覆盖与解析优先级（[§8](docs/persona.md)） |
 | 接话决策 | 过滤 → 寻址判定 → 随机参与 → 批处理窗口合并成一轮生成（[§7](docs/participation.md)） |
 | 名单策略 | 群聊与私聊各一套模式 + 单列表（[§7.8](docs/participation.md)） |
+| 工具调用 | 通过外部 MCP 服务（Streamable HTTP）按人格暴露工具，模型按需调用；目录可在运行时刷新，需 LLM 服务支持 tool calling（[`docs/mcp.md` 第 14 章](docs/mcp.md)） |
 | 管理命令 | `/persona` 系列，仅管理员，不调用 LLM、不进历史（[§8.4](docs/persona.md)） |
 | 持久化 | 每会话的人格覆盖与开关、插件级名单策略写入 `bot.Storage`；历史与计数器只在内存，覆盖与策略的存续取决于宿主存储后端（默认 memory 重启即丢，`storage.type: sqlite`/`mysql` 保留） |
 | 可观测 | 每条消息以 `Debug` 输出决策行（reason 词表见 [§7.7](docs/participation.md)），`/persona status` 汇总计数 |
@@ -89,6 +90,8 @@ plugins:
 | `/persona on` / `off` / `reset` | 开关本会话 / 清历史与覆盖 |
 | `/persona policy [group\|private mode]` | 查看或设置名单模式 |
 | `/persona list [group\|private [add\|del id]]` | 查看或增删名单项 |
+| `/persona tools` | 查看当前 MCP 工具目录（只读本地，不联网） |
+| `/persona tools reload` | 后台刷新 MCP 工具目录，完成后另发结果 |
 
 ## 项目结构
 

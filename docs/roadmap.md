@@ -81,7 +81,8 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **多模态输入可选**：`llm_vision_enabled=true` 时插件下载最近入站图片（上限 `llm_vision_max_images`，每条消息最多 1 张，单张上限 `llm_vision_max_image_bytes`）并以 base64 内联发送给视觉模型，默认关闭（见 [`llm.md`](llm.md) §9.1）。`llm_vision_allowed_formats` 非空时只发送清单内的格式（跳过清单外格式，不转码）。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
-- **MCP 兼容范围**：单端点 Streamable HTTP，固定协议版本 `2025-11-25`，普通同步工具调用与手动目录刷新；不支持 stdio、OAuth、多端点或自动订阅更新（见 [`mcp.md`](mcp.md) 第 14 章）。
+- **MCP 兼容范围**：单端点 Streamable HTTP，固定协议版本 `2025-11-25`，普通同步工具调用与手动目录刷新；不支持 stdio、OAuth、多端点或自动订阅更新（见 [`mcp.md`](mcp.md) 第 14 章）。单次操作内所有响应累计读取上限 1 MiB，超出即加载失败。
+- **工具循环占用并发名额**：整轮工具调用都在 `generate` 已持有的全局信号量内完成（[`mcp.md`](mcp.md) §13.4），默认上界约 `3×40s + 2×3×8s`；`limits_max_concurrent` 较小时，慢 MCP 端点会让其它会话的生成被丢成 `semaphore_full`。
 
 ## 12.4 假设与兜底
 
