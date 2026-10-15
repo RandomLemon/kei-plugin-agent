@@ -367,7 +367,7 @@ func TestOpenAIClientDebugLogsErrorResponseBody(t *testing.T) {
 }
 
 func TestParseCompletionToolCalls(t *testing.T) {
-	const calls = `"tool_calls":[{"id":"call_1","type":"function","function":{"name":"knowledge_search","arguments":"{\"query\":\"q\"}"}}]`
+	const calls = `"tool_calls":[{"id":"call_1","type":"function","function":{"name":"mcp__search","arguments":"{\"query\":\"q\"}"}}]`
 	cases := []struct {
 		name        string
 		body        string
@@ -386,7 +386,7 @@ func TestParseCompletionToolCalls(t *testing.T) {
 			if res.Content != tc.wantContent {
 				t.Fatalf("Content = %q, want %q", res.Content, tc.wantContent)
 			}
-			want := []toolCall{{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "knowledge_search", Arguments: `{"query":"q"}`}}}
+			want := []toolCall{{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "mcp__search", Arguments: `{"query":"q"}`}}}
 			if !reflect.DeepEqual(res.ToolCalls, want) {
 				t.Fatalf("ToolCalls = %+v", res.ToolCalls)
 			}
@@ -396,8 +396,8 @@ func TestParseCompletionToolCalls(t *testing.T) {
 
 func TestOpenAIClientToolsPayload(t *testing.T) {
 	text := "先查一下"
-	result := "[知识库检索结果] 没有找到相关资料。"
-	call := toolCall{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "knowledge_search", Arguments: `{"query":"q"}`}}
+	result := "[外部工具结果] 资料"
+	call := toolCall{ID: "call_1", Type: "function", Function: toolCallFunction{Name: "mcp__search", Arguments: `{"query":"q"}`}}
 	withTools := completionRequest{
 		System: "s",
 		User:   textParts("u"),
@@ -405,7 +405,7 @@ func TestOpenAIClientToolsPayload(t *testing.T) {
 			{Role: "assistant", Content: &text, ToolCalls: []toolCall{call}},
 			{Role: "tool", Content: &result, ToolCallID: "call_1"},
 		},
-		Tools: []toolDef{{Type: "function", Function: toolFunction{Name: "knowledge_search", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+		Tools: []toolDef{{Type: "function", Function: toolFunction{Name: "mcp__search", Parameters: json.RawMessage(`{"type":"object"}`)}}},
 	}
 	withNone := withTools
 	withNone.ToolChoice = "none"

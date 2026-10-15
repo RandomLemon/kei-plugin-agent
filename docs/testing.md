@@ -103,6 +103,8 @@ go test -race ./...
 | 无可用工具（`p.tools` 为空，或人格 `tools: []`） | 只调用一次 `Complete`，请求不带 `tools`，行为与引入工具前一致 |
 | 人格 `tools` 三态（不写 / `[]` / 名单） | 不写 → 请求 `tools[]` 为当前 `p.tools` 全部且保持装配顺序；`[]` → 不带 `tools`；名单 → 与目录取交集；缺失的 MCP 名字不暴露 |
 | MCP 客户端与动态目录 | 按 [`mcp.md`](mcp.md) §14.8 精简新增覆盖：P8 调用闭环、失败不重放、取消三组；P9 刷新、并发快照与关闭两组。集中在 `mcp_test.go` 并复用现有桩；配置、人格和简单命令只补现有表格，不重复工具循环与 mock 适配器测试。阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)，质量门不变 |
+| MCP 目录校验与启动失败 | `mcp_test.go`：非法（含点/超长/控制字符）、重名、非 object schema、要求 tasks 的条目各自整体拒绝，错误细节带出错工具名（转义、按 rune 截断 64）；Start 加载失败返回错误、记 `Warn`、取消插件级 ctx、清理 session、不发布目录，随后 `Stop` 不重复 DELETE |
+| MCP 累计读取预算 | `mcp_test.go` 的桩检验分页中途失败与空列表；累计 1 MiB 由 `mcpBudget` 在单次操作内共享（含初始化与分页），超限返回 `response_too_large` |
 | 工具循环：模型先返回 `tool_calls` 再返回文本 | 工具被调用一次；第二次请求的 `Followups` 为 assistant(tool_calls) + tool(结果，`tool_call_id` 对应)；最终文本被发送 |
 | 工具循环：模型每轮都返回 `tool_calls`（`tools_max_rounds=2`） | 共 3 次 `Complete`，第 3 次 `ToolChoice="none"`；第 3 次仍返回 `tool_calls` 时只取 `content`（空则 `reason=empty_reply`） |
 | 工具循环：一轮返回 4 个调用 | 前 3 个执行；第 4 个回忽略文本、`status=ignored`；4 个 `tool_call_id` 都有对应 tool 消息 |

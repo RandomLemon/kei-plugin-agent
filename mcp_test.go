@@ -3,13 +3,20 @@ package persona
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/RandomLemon/kei/pkg/bot"
 )
 
 type mcpRecorded struct {
@@ -520,4 +527,175 @@ func TestMCPReloadSnapshotAndStop(t *testing.T) {
 			t.Fatalf("session 未清理: %d", deletes)
 		}
 	})
+}
+
+// TestMCPDirectoryValidation 覆盖目录校验：任一条目非法即整体失败，错误细节带出错工具名。
+func TestMCPDirectoryValidation(t *testing.T) {
+	client := newMCPClient(&config{mcpURL: "http://mcp.test/mcp"}, http.DefaultClient)
+
+	tooLong := testMCPDef(strings.Repeat("y", 100))
+	dupA, dupB := testMCPDef("dup"), testMCPDef("dup")
+	badSchema := testMCPDef("search")
+	badSchema.InputSchema = json.RawMessage(`{"type":"array"}`)
+	missingSchema := testMCPDef("search")
+	missingSchema.InputSchema = nil
+	tasks := testMCPDef("search")
+	tasks.Execution.TaskSupport = "required"
+	control := testMCPDef("bad\nname")
+
+	cases := []struct {
+		name    string
+		defs    []mcpToolDef
+		wantErr string // 空表示应当成功
+	}{
+		{"合法目录", []mcpToolDef{testMCPDef("search"), testMCPDef("extra")}, ""},
+		{"远端名 59 字符仍合法", []mcpToolDef{testMCPDef(strings.Repeat("x", 59))}, ""},
+		{"远端名含点", []mcpToolDef{testMCPDef("fs.read")}, `bad_tool_name:"fs.read"`},
+		{"远端名超长", []mcpToolDef{tooLong}, `bad_tool_name:"` + strings.Repeat("y", 64) + `"`},
+		{"远端名含控制字符", []mcpToolDef{control}, `bad_tool_name:"bad\nname"`},
+		{"重名", []mcpToolDef{dupA, dupB}, `duplicate_tool_name:"dup"`},
+		{"schema 非 object", []mcpToolDef{badSchema}, `bad_tool_schema:"search"`},
+		{"schema 缺失", []mcpToolDef{missingSchema}, `bad_tool_schema:"search"`},
+		{"要求 tasks", []mcpToolDef{tasks}, `tasks_required:"search"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tools, err := buildMCPTools(client, tc.defs)
+			if tc.wantErr != "" {
+				var failure *mcpError
+				if !errors.As(err, &failure) || failure.detail != tc.wantErr {
+					t.Fatalf("错误 = %v, want detail %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildMCPTools: %v", err)
+			}
+			names := make([]string, 0, len(tools))
+			for _, tl := range tools {
+				names = append(names, tl.Def().Function.Name)
+			}
+			if !slices.IsSorted(names) {
+				t.Fatalf("目录应按本地名排序: %v", names)
+			}
+			for _, in := range tc.defs {
+				local := mcpPrefix + in.Name
+				idx := slices.IndexFunc(tools, func(tl tool) bool { return tl.Def().Function.Name == local })
+				if idx < 0 {
+					t.Fatalf("目录缺少 %s: %v", local, names)
+				}
+				def := tools[idx].Def().Function
+				if def.Description != in.Description || string(def.Parameters) != string(in.InputSchema) {
+					t.Fatalf("%s 定义 = %+v", local, def)
+				}
+			}
+		})
+	}
+}
+
+// TestMCPCumulativeBudget 分页把单次操作的累计读取量限制在 1 MiB 内（mcp.md §14.4）：
+// 服务端持续返回接近上限的页面时按 response_too_large 失败，而不是无限累积内存。
+func TestMCPCumulativeBudget(t *testing.T) {
+	desc := strings.Repeat("a", 8*1024)
+	var mu sync.Mutex
+	served := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg mcpMessage
+		if json.NewDecoder(r.Body).Decode(&msg) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reply := func(result string) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(msg.ID) + `,"result":` + result + `}`))
+		}
+		switch msg.Method {
+		case "initialize":
+			w.Header().Set("MCP-Session-Id", "s1")
+			reply(`{"protocolVersion":"` + mcpVersion + `","capabilities":{"tools":{}}}`)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			mu.Lock()
+			n := served
+			mu.Unlock()
+			page := struct {
+				Tools      []mcpToolDef `json:"tools"`
+				NextCursor string       `json:"nextCursor"`
+			}{Tools: []mcpToolDef{{Name: "t" + strconv.Itoa(n), Description: desc, InputSchema: json.RawMessage(`{"type":"object"}`)}}, NextCursor: "more"}
+			data, _ := json.Marshal(page)
+			mu.Lock()
+			served += len(data)
+			mu.Unlock()
+			reply(string(data))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	c := newMCPClient(&config{mcpURL: srv.URL}, srv.Client())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := c.listTools(ctx)
+	var failure *mcpError
+	if !errors.As(err, &failure) || failure.detail != "response_too_large" {
+		t.Fatalf("累计超限应返回 response_too_large: %v", err)
+	}
+	mu.Lock()
+	total := served
+	mu.Unlock()
+	if total > mcpMaxResponse+64*1024 {
+		t.Fatalf("分页读取超出预算: 服务端发出 %d 字节", total)
+	}
+}
+
+// TestMCPStartLoadFailureAborts 覆盖 mcp.md §14.10.1 第 5 步：目录加载失败时中止启动、
+// 清理已建立的 session，随后 Stop 不重复删除。
+func TestMCPStartLoadFailureAborts(t *testing.T) {
+	s := newMCPStub(t, false)
+	s.setDirectory([]mcpToolDef{{Name: "fs.read", Description: "d", InputSchema: json.RawMessage(`{"type":"object"}`)}}, false)
+
+	cfg := baseConfigMap(s.srv.URL)
+	fastConfig(cfg)
+	cfg["mcp_url"] = s.srv.URL
+	cfg["mcp_timeout"] = "2s"
+	cap := &logCapture{}
+	p := &Plugin{}
+	pc := bot.PluginContext{
+		Name:       "persona",
+		Config:     bot.NewConfig(cfg),
+		Logger:     slog.New(cap),
+		Storage:    newFakeStorage(),
+		HTTPClient: s.srv.Client(),
+		Bot:        &fakeBotAPI{},
+	}
+	stageCtx := bot.WithPluginContext(context.Background(), pc)
+	if err := p.Setup(stageCtx, &fakeRegistrar{}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	err := p.Start(stageCtx)
+	if err == nil || !strings.Contains(err.Error(), `bad_tool_name:"fs.read"`) {
+		t.Fatalf("Start 应因非法工具名失败: %v", err)
+	}
+	if !cap.hasMsg("persona: MCP 工具目录加载失败，启动中止") {
+		t.Fatal("启动失败应记 Warn")
+	}
+	if p.ctx == nil || p.ctx.Err() == nil {
+		t.Fatal("启动失败应取消插件级 ctx")
+	}
+	if tools := p.toolsFor("default"); len(tools) != 0 {
+		t.Fatalf("失败时不应发布目录: %d", len(tools))
+	}
+	if _, _, deletes := s.counts(); deletes != 1 {
+		t.Fatalf("启动失败应清理 session: DELETE=%d", deletes)
+	}
+
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, _, deletes := s.counts(); deletes != 1 {
+		t.Fatalf("Stop 不应重复 DELETE: %d", deletes)
+	}
 }
