@@ -4,9 +4,9 @@
 
 ## 12.1 现状
 
-**P1-P9 已落地。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。管理员通过 `/persona tools` 查看本地目录、`/persona tools reload` 后台刷新；完整加载成功后整体替换，失败保留旧目录，当前生成保持定义与实现快照。端点和凭据修改仍需重启。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**P1-P9 已落地。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。管理员通过 `/agent tools` 查看本地目录、`/agent tools reload` 后台刷新；完整加载成功后整体替换，失败保留旧目录，当前生成保持定义与实现快照。端点和凭据修改仍需重启。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
 
-`docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/persona` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
+`docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 
 质量门与开发环境见 [`testing.md`](testing.md) §11.1。
 
@@ -20,7 +20,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - `register.go`：`init()` 注册 + `Metadata`（见 [`architecture.md`](architecture.md) §3.1）。
 - `plugin.go`：`Plugin` 结构、`Setup`/`Start`/`Stop`、从 `PluginContext` 装配 runtime 与注入缝。
 - `config.go`：全部键读取与默认值、`loadConfig` 全部校验（见 [`configuration.md`](configuration.md) §10.4）。
-- 注册两条规则 + 只记历史的 Handler（先不决策）+ `/persona status|on|off`。
+- 注册两条规则 + 只记历史的 Handler（先不决策）+ `/agent status|on|off`。
 - `config_test.go` 覆盖校验规则与固定错误文案。
 
 ### P2 决策
@@ -38,7 +38,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 ### P4 人格
 
 - `persona.go`：`personas` 解析、`bindings` 匹配与优先级、`persona_template` 渲染、历史渲染。
-- `/persona switch|reset` 子命令与持久化调用。
+- `/agent switch|reset` 子命令与持久化调用。
 - `persona_test.go`：模板 11 个占位符、未知占位符保留、6 种回落占位符、清洗样例、命令输出。
 
 ### P5 持久化与联调
@@ -52,7 +52,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 - `bot.WithKind(bot.MessagePrivate)` 私聊规则 `persona:private`：私聊视为寻址、必回（受 `mention_min_interval`/`mention_reply_probability` 约束），不进入随机路径（[`participation.md`](participation.md) §7.2-7.3）。
 - 会话类型贯穿状态与渲染：`channelState.kind`/`peerUserID`、`{{chat_kind}}`（[`persona.md`](persona.md) §8.5）、历史块头 `[群聊记录]`/`[私聊记录]`（§8.6）、私聊发送目标 `message.Private` + `Target{UserID, Kind: MessagePrivate}`（§7.5）。
 - `policy.go`：群聊/私聊各一套「模式 + 单列表」（`off`/`open`/`whitelist`/`blacklist`），`not_allowed` 在建立会话状态之前判定（[`participation.md`](participation.md) §7.8）。
-- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/persona policy`、`/persona list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `policy` 键，`Start` 同步恢复。
+- 配置键 `group_policy`/`group_list`/`private_policy`/`private_list`（[`configuration.md`](configuration.md) §10.1）与运行期命令 `/agent policy`、`/agent list`（[`persona.md`](persona.md) §8.4），写穿透持久化到 `policy` 键，`Start` 同步恢复。
 
 ### P7 工具调用与知识库检索（历史实现）
 
@@ -78,7 +78,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 
 ## 12.3 已知缺口
 
-- **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/persona status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
+- **无插件级指标**：核心只暴露自身 Prometheus 指标；本插件的观测面是 `/agent status` 与结构化日志（[`participation.md`](participation.md) §7.7）。
 - **多模态输入可选**：`llm_vision_enabled=true` 时插件下载最近入站图片（上限 `llm_vision_max_images`，每条消息最多 1 张，单张上限 `llm_vision_max_image_bytes`）并以 base64 内联发送给视觉模型，默认关闭（见 [`llm.md`](llm.md) §9.1）。`llm_vision_allowed_formats` 非空时只发送清单内的格式（跳过清单外格式，不转码）。
 - **无流式输出**：单次阻塞式补全，不支持 SSE 流式。
 - **MCP 兼容范围**：单端点 Streamable HTTP，固定协议版本 `2025-11-25`，普通同步工具调用与手动目录刷新；不支持 stdio、OAuth、多端点或自动订阅更新（见 [`mcp.md`](mcp.md) 第 14 章）。单次操作内所有响应累计读取上限 1 MiB，超出即加载失败。

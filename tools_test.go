@@ -296,7 +296,7 @@ func TestToolLoopStale(t *testing.T) {
 	search := &stubTool{name: stubToolName}
 	var st *channelState
 	comp := &stubCompleter{fn: func(int) (completionResult, error) {
-		// 模拟生成期间被 /persona off|switch|reset。
+		// 模拟生成期间被 /agent off|switch|reset。
 		st.mu.Lock()
 		st.epoch++
 		st.mu.Unlock()

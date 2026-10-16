@@ -35,7 +35,7 @@ func (p *Plugin) handlePrivateMessage(ctx context.Context, ev *bot.Event, r bot.
 // handleChat 是群聊与私聊共用的入站处理：过滤 → 记历史 → 判决策 → 布防。
 func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) error {
 	key, _, _, channelID := channelKey(ev)
-	if ev.Command != nil && ev.Command.Name == "persona" {
+	if ev.Command != nil && ev.Command.Name == "agent" {
 		return p.skipLog(key, "command", ev.Sender.ID)
 	}
 	// 名单策略在建立会话状态之前判定：被拒的会话不建状态、不进历史、不触发懒加载。

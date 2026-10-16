@@ -11,10 +11,10 @@ import (
 )
 
 func personaUsage() string {
-	return "用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
+	return "用法: /agent status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
 }
 
-// handleCommand 处理 /persona 管理命令。
+// handleCommand 处理 /agent 管理命令。
 func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) error {
 	if ev.Command == nil {
 		return nil
@@ -173,7 +173,7 @@ func (p *Plugin) reloadMCPTools(target bot.Target) {
 	}
 }
 
-// statusLine 生成 /persona status 的固定格式一行。
+// statusLine 生成 /agent status 的固定格式一行。
 func (p *Plugin) statusLine(st *channelState) string {
 	now := p.now()
 	st.mu.Lock()

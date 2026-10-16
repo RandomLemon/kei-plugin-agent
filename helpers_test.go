@@ -267,6 +267,18 @@ func (r *fakeRegistrar) byID(id string) bot.Handler {
 	return nil
 }
 
+// commandRule 返回注册的唯一 OnCommand 规则（插件只有一条命令规则）。
+func (r *fakeRegistrar) commandRule() *bot.Rule {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rule := range r.rules {
+		if rule.Command != "" {
+			return rule
+		}
+	}
+	return nil
+}
+
 // rule 返回指定 ID 的规则（含 Kind 等过滤字段），未注册返回 nil。
 func (r *fakeRegistrar) rule(id string) *bot.Rule {
 	r.mu.Lock()
@@ -396,11 +408,11 @@ func (e *testEnv) deliver(ev *bot.Event) error {
 	return e.groupHandler()(context.Background(), ev, bot.NewNoopReply())
 }
 
-// command 投递一条 /persona 命令。
+// command 投递一条 /agent 命令。
 func (e *testEnv) command(args ...string) string {
 	e.t.Helper()
 	ev := groupEvent("g1", "u1", "张三", "")
-	ev.Command = &bot.Command{Name: "persona", Args: args}
+	ev.Command = &bot.Command{Name: "agent", Args: args}
 	r := bot.NewNoopReply()
 	if err := e.commandHandler()(context.Background(), ev, r); err != nil {
 		e.t.Fatalf("command %v: %v", args, err)
@@ -488,11 +500,11 @@ func (e *testEnv) deliverPrivate(ev *bot.Event) error {
 	return e.privateHandler()(context.Background(), ev, bot.NewNoopReply())
 }
 
-// privateCommand 投递一条来自私聊的 /persona 命令，返回回复文本。
+// privateCommand 投递一条来自私聊的 /agent 命令，返回回复文本。
 func (e *testEnv) privateCommand(userID string, args ...string) string {
 	e.t.Helper()
 	ev := privateEvent(userID, "张三", "")
-	ev.Command = &bot.Command{Name: "persona", Args: args}
+	ev.Command = &bot.Command{Name: "agent", Args: args}
 	r := bot.NewNoopReply()
 	if err := e.commandHandler()(context.Background(), ev, r); err != nil {
 		e.t.Fatalf("private command %v: %v", args, err)

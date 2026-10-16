@@ -17,7 +17,7 @@ import (
 // docs/architecture.md §4.4），插件不自己拼插件名前缀。
 const policyKey = "policy"
 
-// scopeGroup / scopePrivate 是 /persona policy|list 的两个作用域。
+// scopeGroup / scopePrivate 是 /agent policy|list 的两个作用域。
 const (
 	scopeGroup   = "group"
 	scopePrivate = "private"
@@ -254,7 +254,7 @@ func (p *Plugin) delPolicyID(scope, id string) {
 	}
 }
 
-// policyReport 渲染 `/persona policy`：`persona: group=open(0) · private=off(0)`。
+// policyReport 渲染 `/agent policy`：`persona: group=open(0) · private=off(0)`。
 func (p *Plugin) policyReport() string {
 	p.policyMu.RLock()
 	groupMode, groupList, _ := p.policy.forScope(scopeGroup)
@@ -275,7 +275,7 @@ func (p *Plugin) policyScopeReport(scope string) string {
 	return "persona: " + scope + "=" + mode + "(" + strconv.Itoa(len(list)) + ")"
 }
 
-// listReport 渲染 `/persona list`：`persona: group=[g1 g2] private=[u1]`（空名单为 `[]`）。
+// listReport 渲染 `/agent list`：`persona: group=[g1 g2] private=[u1]`（空名单为 `[]`）。
 func (p *Plugin) listReport() string {
 	p.policyMu.RLock()
 	_, groupList, _ := p.policy.forScope(scopeGroup)

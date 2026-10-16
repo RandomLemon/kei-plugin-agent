@@ -66,7 +66,7 @@ func TestE2EMockAdapterInject(t *testing.T) {
 		t.Fatalf("发送内容 = %v", got)
 	}
 
-	// /persona off 后不再增长。
+	// /agent off 后不再增长。
 	env.command("off")
 	before := env.fake.count()
 	inject(`{"text":"还在吗","user_id":"u3","user_name":"王五","channel_id":"g1"}`)

@@ -119,7 +119,7 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	reg.OnEvent(bot.EventMessage, p.handlePrivateMessage,
 		bot.WithKind(bot.MessagePrivate), bot.WithPriority(0), bot.WithID("persona:private"))
 
-	reg.OnCommand("persona", p.handleCommand,
+	reg.OnCommand("agent", p.handleCommand,
 		bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 	return nil
 }

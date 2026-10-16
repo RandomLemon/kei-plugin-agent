@@ -382,7 +382,7 @@ func (p *Plugin) finishLoad(st *channelState, persona string, disabled, restored
 	pend := st.pending
 	st.pending = nil
 	if pend != nil && pend.epoch != st.epoch {
-		pend = nil // 期间被 /persona reset 代次作废，暂存消息随之丢弃
+		pend = nil // 期间被 /agent reset 代次作废，暂存消息随之丢弃
 	}
 	st.mu.Unlock()
 

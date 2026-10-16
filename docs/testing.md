@@ -40,15 +40,16 @@ go test -race ./...
 | 私聊 `reply_mention_sender=true` | 回复只有文本段（私聊不加 At 段） |
 | 两个私聊对端（`u1`/`u2`） | 会话键 `mock:bot1:user:<id>` 与覆盖键互不相同 |
 | `persona:private` 规则注册 | 规则存在、`EventType=EventMessage`、`Kind=MessagePrivate` |
-| `/persona policy`、`/persona list`（含 `add`/`del`/缺参/非法 scope/mode） | 输出行字面量一致；`add` 已存在、`del` 不存在幂等；非法参数回用法文本 |
+| 命令触发名 | 命令规则注册为 `agent`：`/agent ...` 命中，`/persona ...` 不再命中 |
+| `/agent policy`、`/agent list`（含 `add`/`del`/缺参/非法 scope/mode） | 输出行字面量一致；`add` 已存在、`del` 不存在幂等；非法参数回用法文本 |
 | 策略写穿透 | `Storage` 键 `policy` 值含新模式/名单 |
 | `Start` 恢复策略（合法 / 非法模式 / `null` 列表 / `[]` 列表 / 坏 JSON / 无覆盖） | 合法值生效；非法模式与 `null` 列表回落配置默认值；`[]` 采用空名单；坏 JSON 不 panic 且回落默认值 |
 | 机器人发送者且 `ignore_bots=true` | 决策结果 `reason=bot_sender` |
 | 命令消息且 `respond_to_commands=false` | 决策结果 `reason=command` |
-| `/persona` 命令 | 决策结果 `reason=command`，且**不进历史** |
+| `/agent` 命令 | 决策结果 `reason=command`，且**不进历史** |
 | 文本为空 | 决策结果 `reason=empty_text` |
 | 文本短于 `trigger_min_chars` | 决策结果 `reason=too_short` |
-| 会话被 `/persona off` 后入站 | 决策结果 `reason=channel_off` |
+| 会话被 `/agent off` 后入站 | 决策结果 `reason=channel_off` |
 | Storage 懒加载未完成时入站 | 决策结果 `reason=loading`，且本条被暂存：`Get` 放行后**补判一次**并回复（群聊回 `g1`、私聊回对端）；加载窗口内多条只补判最新一条 |
 | 懒加载期间暂存的消息 × 加载到的覆盖 | `disabled=true` → 补判结果 `channel_off`、不发送；`persona` 覆盖在补判生成中生效 |
 | 非寻址且 `random_enabled=false` | 决策结果 `reason=not_addressed` |
@@ -67,7 +68,7 @@ go test -race ./...
 | `random_quiet_hours` 跨零点（如 `23:00-07:00`，注入 `p.now`） | 窗口内 `reason=quiet_hours`，窗口外放行 |
 | `random_timezone` 影响 `{{now}}` 与静默判定 | 注入不同时区，静默判定边界随之移动 |
 | 批处理窗口合并（`batch_window=50ms`，真实定时器） | 窗口内多条消息合并为**一次**生成；`batch_max_window` 上限生效 |
-| `st.epoch` 变化（`/persona off` 后定时器回调） | 在途结果被丢弃，`reason=stale`，不发送 |
+| `st.epoch` 变化（`/agent off` 后定时器回调） | 在途结果被丢弃，`reason=stale`，不发送 |
 | 全局信号量占满（`limits_max_concurrent=1` 且已有在途） | `reason=semaphore_full`，不排队 |
 | LLM 返回 skip token | `reason=skipped_by_llm` |
 | LLM 返回空串 | `reason=empty_reply` |
@@ -81,10 +82,10 @@ go test -race ./...
 | 历史裁剪 | 超 `context_max_messages` 或 `llm_history_max_chars`（rune）从最旧丢弃，保留最新一条 |
 | 清洗管线 8 步（见 [`persona.md`](persona.md) §8.7） | 每条输入→输出样例一致 |
 | 在途写穿透未完成时调用 `Stop`（`Set` 阻塞到 gate 关闭） | `Stop` 先拒绝新写入并等其落库、再取消插件级 ctx：写入不被取消，`Stop` 在其结束后才返回（持久化后端不丢最后一次覆盖/策略） |
-| `/persona status` | 输出固定字段顺序一行 |
-| `/persona switch` | 输出 `persona: persona=<name> 来源=<override\|binding\|default>` |
-| `/persona on`、`/persona off` | 切换开关，触发 `Storage.Set`，关闭时递增 `st.epoch` |
-| `/persona reset` | 清历史/覆盖/计数器，置为开启，递增 `st.epoch` |
+| `/agent status` | 输出固定字段顺序一行 |
+| `/agent switch` | 输出 `persona: persona=<name> 来源=<override\|binding\|default>` |
+| `/agent on`、`/agent off` | 切换开关，触发 `Storage.Set`，关闭时递增 `st.epoch` |
+| `/agent reset` | 清历史/覆盖/计数器，置为开启，递增 `st.epoch` |
 | `llm.go` 用 `httptest.Server`：200 | 返回解析后的文本 content |
 | `llm.go` 429 重试 / 500 重试 | 按 `llm_max_retries` 重试并最终成功 |
 | `llm.go` 400 不重试 | 立即返回错误，不重试 |
@@ -195,10 +196,10 @@ PY
    curl -sS 127.0.0.1:18080/sent | jq '.[-1].Request.Message.Segments[0].Data.text'
    ```
    期望得到一条 LLM 文本（桩服务返回 `打球可以啊`）。
-5. 注入 `/persona status`（核心 `auth.admin_users: ["u1"]`）→ 期望输出含 `persona=` 与计数器。
-6. 注入 `/persona off` 后再注入消息 → 期望 `/sent` 不再增长。
+5. 注入 `/agent status`（核心 `auth.admin_users: ["u1"]`）→ 期望输出含 `persona=` 与计数器。
+6. 注入 `/agent off` 后再注入消息 → 期望 `/sent` 不再增长。
 7. 私聊（配置 `private_policy: open`）：注入 `{"kind":"private","text":"在吗","user_id":"u1","user_name":"张三"}` → 期望 `/sent` 增长，且 `Target.Kind=private`、`Target.UserID=u1`、`Target.ChannelID` 为空（`curl -sS 127.0.0.1:18080/sent | jq '.[-1].Request.Target'`）。
-8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/persona policy`、`/persona list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；配了持久化存储后端（见上）时，重启宿主后 `/persona policy` 应显示 `policy` 键（底层键 `plugin:persona:policy`）里的覆盖值而非配置默认值——默认 memory 后端重启即丢，此时该断言不成立。
+8. 名单策略（配置 `group_policy: whitelist`、`group_list: ["g9"]`）：向 `g1` 注入消息 → `/sent` 不增长；向 `g9` 注入消息 → `/sent` 增长。再注入 `/agent policy`、`/agent list group add g9`（核心 `auth.admin_users: ["u1"]`）→ 比对 [`participation.md`](participation.md) §7.8 的字面量；配了持久化存储后端（见上）时，重启宿主后 `/agent policy` 应显示 `policy` 键（底层键 `plugin:persona:policy`）里的覆盖值而非配置默认值——默认 memory 后端重启即丢，此时该断言不成立。
 
 说明：mock 适配器的 HTTP `/inject` 支持 `kind`（缺省 `group`；可选 `private`/`channel`，`channel` 构造 `Channel`，`private` 不构造）与任意文本，非法 `kind` 返回 400 且不投递事件；控制面只允许绑定回环地址（非回环需显式开 `allow_remote_control_plane`），插件文档里的 `127.0.0.1:0` 用法不受影响。但 `/inject` **无法构造 `bot.SegAt`**。因此「寻址（@/引用）」用例改用 Go 侧 `Adapter.Inject(ctx, ev)` 注入含任意 `Segments` 的事件（写在 `e2e_test.go`），HTTP 路径覆盖随机插话、命令与私聊（`e2e_test.go` 的 `TestE2EMockAdapterPrivate`）。`/sent` 的每条记录含完整 `Request.Target`，可断言 `Kind`/`ChannelID`/`UserID`（私聊发送 `ChannelID` 为空）。
 

@@ -11,7 +11,7 @@ import (
 // maxToolCallsPerRound 是单轮最多执行的工具调用数；多出的调用只回忽略文本。
 const maxToolCallsPerRound = 3
 
-// errStale 表示工具轮之间会话 epoch 已变化（/persona off|switch|reset），本轮生成作废。
+// errStale 表示工具轮之间会话 epoch 已变化（/agent off|switch|reset），本轮生成作废。
 var errStale = errors.New("persona: 会话已变化，放弃本轮生成")
 
 // tool 是一个可供 LLM 调用的工具。

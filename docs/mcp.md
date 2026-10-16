@@ -94,7 +94,7 @@ runTool(tools, i, call) toolResult:            # 循环层兜底，对所有工�
 - **未知工具**：模型调用了不在当前人格可用列表里的工具（含幻觉出的名字）时返回未知工具文本，不执行。
 - **顺序执行**：同一轮的多个调用串行执行，工具调用本身不额外起协程（[`architecture.md`](architecture.md) §3.2）。
 - **信号量**：整个循环都在 `generate` 已持有的全局信号量内完成，工具调用不额外占用或释放并发名额。
-- **epoch**：每轮执行工具前检查 `st.epoch`；会话期间被 `/persona off|switch|reset` 时立即放弃，reason `stale`，不再浪费工具与 LLM 请求。发送前的 epoch 复核（§7.6）保持不变。
+- **epoch**：每轮执行工具前检查 `st.epoch`；会话期间被 `/agent off|switch|reset` 时立即放弃，reason `stale`，不再浪费工具与 LLM 请求。发送前的 epoch 复核（§7.6）保持不变。
 - **ctx**：工具调用一律用插件级 `p.ctx` 派生，禁止 Handler ctx 与 `context.Background()`。`Stop` 取消 `p.ctx` 后循环在当前请求返回时退出。
 - **耗时上界**：`(tools_max_rounds + 1) × LLM 单次上界（llm.md §9.3） + tools_max_rounds × maxToolCallsPerRound × tools_call_timeout`。默认值下约为 `3 × 40s + 2 × 3 × 8s`，均脱离 Handler，不受 `RuleTimeout`/`EventTimeout` 约束。
 - **清洗与发送**：循环返回的 `content` 照常走回复清洗管线（[`persona.md`](persona.md) §8.7），reason 词表不变（[`participation.md`](participation.md) §7.7）。清洗会压平换行并按 `reply_max_chars` 截断，资料类人格宜只回答关键步骤并附链接。
@@ -114,7 +114,7 @@ msg="persona 工具调用" channel=<key> tool=<name> status=<status> detail=<det
 - `status` 是**循环层**的固定取值：`ok`、`error`、`timeout`、`ignored`、`unknown_tool`。新增工具不扩充该词表；工具自己的细分原因放 `detail`，MCP 的转换与错误细分见 [`mcp.md`](mcp.md) §14.5。
 - 工具参数原文只在 `debug_prompts=true` 时附加（字段 `args`，按 rune 截断 256）；LLM 请求体日志（[`llm.md`](llm.md) §9.5）此时已包含工具消息。
 - MCP 客户端的错误与刷新日志见 [`mcp.md`](mcp.md) §14.5，凭据与 session ID 不进日志。
-- 工具调用不计入 `/persona status` 的计数器；一次生成最终仍只记一条决策行（[`participation.md`](participation.md) §7.7）。
+- 工具调用不计入 `/agent status` 的计数器；一次生成最终仍只记一条决策行（[`participation.md`](participation.md) §7.7）。
 
 ## 14. MCP 接入与运行时目录
 
@@ -221,8 +221,8 @@ HTTP/JSON-RPC 必须处理的部分：
 
 新增管理员命令：
 
-- `/persona tools`：显示当前全部工具名称，只读本地目录，不联网。
-- `/persona tools reload`：后台重新拉取 MCP 工具目录；未启用 MCP 时明确提示。只允许一个刷新在途，重复命令立即提示正在刷新，不排队。
+- `/agent tools`：显示当前全部工具名称，只读本地目录，不联网。
+- `/agent tools reload`：后台重新拉取 MCP 工具目录；未启用 MCP 时明确提示。只允许一个刷新在途，重复命令立即提示正在刷新，不排队。
 
 reload 的 Handler 只做参数校验、记录回复目标、登记任务并立即回复「开始刷新」。协程从插件级 `p.ctx` 派生超时，完成后用 `BotAPI.Send` 向原会话发送成功条数或失败原因；发送同样有超时。不持有 Handler ctx、Reply 或可变 Event 指针，命令不进聊天历史。
 
@@ -353,7 +353,7 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 - 不配置 `mcp_url`，人格不配置工具名单：用原宿主启动，普通聊天可运行、目录为空，MCP 请求数为零。
 - 配置 MCP：使用 §14.3 示例并补齐已有 LLM 配置，不需要任何 RAG 专用配置。
 - 迁移原配置：删除 `tools_enabled`、`rag_*`；人格中的 `knowledge_search` 等内置名字改为外部服务提供的 `mcp__<名称>`，或删去名单以继承全部 MCP 工具。外部业务工具实现不属于本仓库交付。
-- 对话流程必须实际走通：群聊或已启用的私聊 → LLM 选择 `mcp__search_manual` → MCP 收到 `search_manual` 与对象参数 → 工具结果返回 LLM → BotAPI 发送最终回复。此阶段还没有 `/persona tools` 子命令。
+- 对话流程必须实际走通：群聊或已启用的私聊 → LLM 选择 `mcp__search_manual` → MCP 收到 `search_manual` 与对象参数 → 工具结果返回 LLM → BotAPI 发送最终回复。此阶段还没有 `/agent tools` 子命令。
 
 **验收条件与测试落点**
 
@@ -376,7 +376,7 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 | --- | --- | --- |
 | [`plugin.go`](../plugin.go) 的 `Plugin` | 增加 `toolsMu sync.RWMutex`、`mcpRefreshing bool`；后者由现有 `writeMu` 保护 | R4、R5 |
 | [`tools.go`](../tools.go) 的 `toolsFor` | 在读锁内复制工具切片并过滤；新增一个整体替换工具目录的函数 | R5 |
-| [`commands.go`](../commands.go) | `/persona tools` 和 `/persona tools reload`；目录展示与刷新准入、后台任务、结果发送 | R4、R5 |
+| [`commands.go`](../commands.go) | `/agent tools` 和 `/agent tools reload`；目录展示与刷新准入、后台任务、结果发送 | R4、R5 |
 | [`plugin.go`](../plugin.go) 的 Stop 与任务登记 | 沿用 `closing` / `p.wg`，阻止关闭期间新刷新；注释与实际状态保护一致 | R4 |
 | `mcp_test.go`、`tools_test.go`、`decision_test.go` | 新增两组刷新测试；既有工具桩写入适配目录锁，简单命令分支补现有测试表 | R4、R5 |
 | [`docs/persona.md`](persona.md)、[`docs/testing.md`](testing.md)、[`docs/roadmap.md`](roadmap.md) | 命令字面量、阶段验收和交付状态与实现同步 | R5 |
@@ -397,8 +397,8 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 
 以下步骤由同一组目录刷新测试覆盖，无需另建 mock 适配器端到端测试：
 
-1. 用 P8 相同配置启动 persona，选择不写 `tools`、继承全部工具的人格，调用一次已有 MCP 工具；执行 `/persona tools`，确认能看到该目录且服务端未收到新的 list 请求。使用同一套可变目录 MCP 桩和能指定调用名称的 completer 桩完成后续验收；不依赖真实模型必然选择某个工具。
-2. 服务端一次更新目录：新增 `get_weather`、删除 `search_manual`、修改另一保留工具的 schema；执行 `/persona tools reload`。收到成功通知后，新生成使用新目录与新 schema，实际调用 `mcp__get_weather` 能得到最终回复，人格名单里保留缺失名字也能正常运行。
+1. 用 P8 相同配置启动 persona，选择不写 `tools`、继承全部工具的人格，调用一次已有 MCP 工具；执行 `/agent tools`，确认能看到该目录且服务端未收到新的 list 请求。使用同一套可变目录 MCP 桩和能指定调用名称的 completer 桩完成后续验收；不依赖真实模型必然选择某个工具。
+2. 服务端一次更新目录：新增 `get_weather`、删除 `search_manual`、修改另一保留工具的 schema；执行 `/agent tools reload`。收到成功通知后，新生成使用新目录与新 schema，实际调用 `mcp__get_weather` 能得到最终回复，人格名单里保留缺失名字也能正常运行。
 3. 让一次 reload 在后续分页失败，确认收到失败通知且旧目录完整保留。
 4. 返回空列表后 reload 成功，确认工具目录为空，下一次生成直接得到普通文本回复。
 

@@ -1,6 +1,6 @@
 # persona.md — 人格系统（第 8 章）
 
-本文覆盖第 8 章：人格预设库、绑定与解析优先级、运行时覆盖与 `/persona` 命令、系统提示词模板、历史渲染、回复清洗。配置键名与默认值以 [`configuration.md`](configuration.md) §10.1 为唯一权威；LLM 请求构造见 [`llm.md`](llm.md) §9.1。
+本文覆盖第 8 章：人格预设库、绑定与解析优先级、运行时覆盖与 `/agent` 命令、系统提示词模板、历史渲染、回复清洗。配置键名与默认值以 [`configuration.md`](configuration.md) §10.1 为唯一权威；LLM 请求构造见 [`llm.md`](llm.md) §9.1。
 
 ## 8.1 预设库
 
@@ -40,7 +40,7 @@ personas:
 
 - `default_persona` 默认 `default`。
 - 必须存在 `personas[default_persona]`，否则 `Setup` 返回错误并点名缺失的预设。
-- `bindings[].persona` 与 `/persona switch <name>` 引用的名字必须存在，否则报错（配置阶段）或命令回绝（运行阶段）。
+- `bindings[].persona` 与 `/agent switch <name>` 引用的名字必须存在，否则报错（配置阶段）或命令回绝（运行阶段）。
 - `prompt` 为空的条目视为错误并点名。
 - 校验错误文案见 [`configuration.md`](configuration.md) §10.4。
 
@@ -73,14 +73,14 @@ bindings:
 | 平台 `feishu`、频道 `g1` | 第 1、2 行（第 2 行非空字段更多） | `deadpan` |
 | 平台 `feishu`、bot `feishu-main`、频道 `g2` | 第 1、3 行（第 3 行非空字段更多） | `deadpan` |
 | 平台 `onebot`、频道 `g9` | 无 | `default_persona` |
-| 平台 `onebot`、频道 `g1`，且已 `/persona switch default` | 覆盖优先 | `default` |
+| 平台 `onebot`、频道 `g1`，且已 `/agent switch default` | 覆盖优先 | `default` |
 
-## 8.4 运行时覆盖与 `/persona` 命令
+## 8.4 运行时覆盖与 `/agent` 命令
 
 命令注册（逐字）：
 
 ```go
-reg.OnCommand("persona", p.handleCommand,
+reg.OnCommand("agent", p.handleCommand,
 	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 ```
 
@@ -108,16 +108,16 @@ reg.OnCommand("persona", p.handleCommand,
 用法文本（逐字）：
 
 ```text
-用法: /persona status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]
+用法: /agent status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]
 ```
 
 `policy`/`list` 的输出行（逐字，语义与空名单行为见 [`participation.md`](participation.md) §7.8）：
 
 ```text
-/persona policy                  → persona: group=open(0) · private=off(0)
-/persona policy group whitelist  → persona: group=whitelist(0)
-/persona list                    → persona: group=[g1 g2] private=[]
-/persona list group add g9       → persona: group=[g1 g2 g9]
+/agent policy                  → persona: group=open(0) · private=off(0)
+/agent policy group whitelist  → persona: group=whitelist(0)
+/agent list                    → persona: group=[g1 g2] private=[]
+/agent list group add g9       → persona: group=[g1 g2 g9]
 ```
 
 - 这两个子命令同样只走 `bot.WithAdmin()`（仅管理员），不做 LLM 调用、不进历史。
@@ -127,8 +127,8 @@ reg.OnCommand("persona", p.handleCommand,
 `tools` 的输出行（逐字；动态目录与后台刷新行为见 [`mcp.md`](mcp.md) §14.6）：
 
 ```text
-/persona tools                   → persona: tools=[<当前全部工具名，以空格分隔>]
-/persona tools reload            → persona: 开始刷新 MCP 工具
+/agent tools                     → persona: tools=[<当前全部工具名，以空格分隔>]
+/agent tools reload              → persona: 开始刷新 MCP 工具
 未启用 MCP                       → persona: 未启用 MCP
 已有刷新在途                     → persona: MCP 工具正在刷新
 插件关闭期间                     → persona: 插件正在关闭，无法刷新 MCP 工具
@@ -138,7 +138,7 @@ reg.OnCommand("persona", p.handleCommand,
 
 目录为空时输出 `persona: tools=[]`；`N` 是本次发布的工具总数，全部来自 MCP。只有 reload 成功发布目录后才发送成功通知，失败原因不得包含凭据或 session ID；语法非法仍回用法文本。
 
-**`/persona status` 输出（字段顺序固定，`·` 分隔，逐字）**：
+**`/agent status` 输出（字段顺序固定，`·` 分隔，逐字）**：
 
 ```text
 persona: 开 · persona=tsundere(override) · 历史 18 条 · 近 1 小时回复 3/6 · 上次回复 42s 前 · llm 错误 0 · 已跳 12
@@ -146,7 +146,7 @@ persona: 开 · persona=tsundere(override) · 历史 18 条 · 近 1 小时回�
 
 字段含义依次为：开关（`开`/`关`）、当前人格与来源（`(override)`/`(binding)`/`(default)`，无覆盖时为 `(binding)` 或 `(default)`）、当前历史条数、近 1 小时回复数/上限（`3/6`）、距上次回复的相对时间（`42s 前`，无回复时写 `从未`）、LLM 错误数、跳过数。
 
-**`/persona switch`（无参数）输出（逐字）**：
+**`/agent switch`（无参数）输出（逐字）**：
 
 ```text
 persona: persona=tsundere 来源=override

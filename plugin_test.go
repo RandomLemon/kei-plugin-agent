@@ -151,3 +151,25 @@ func (s *gatedSetStorage) Set(ctx context.Context, key string, value []byte, ttl
 	}
 	return s.fakeStorage.Set(ctx, key, value, ttl)
 }
+
+// TestCommandTriggerName 锁定触发命令名 `/agent`：核心按 Rule.Command 路由命令
+// （pkg/bot/registrar.go 的 Matches，大小写不敏感），改名必须同步注册名与
+// 聊天过滤里对命令消息的丢弃判定（decision.go 的 handleChat）。
+func TestCommandTriggerName(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	rule := env.reg.commandRule()
+	if rule == nil {
+		t.Fatal("命令规则未注册")
+	}
+	match := func(text string) bool {
+		ev := groupEvent("g1", "u1", "张三", text)
+		ev.Command = bot.ParseCommand(text, []string{"/"})
+		return rule.Matches(ev)
+	}
+	if !match("/agent status") {
+		t.Fatal("/agent 应命中命令规则")
+	}
+	if match("/persona status") {
+		t.Fatal("/persona 不应再命中命令规则")
+	}
+}

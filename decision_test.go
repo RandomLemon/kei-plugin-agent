@@ -86,18 +86,18 @@ func TestFilterReasons(t *testing.T) {
 			t.Fatal("want command")
 		}
 	})
-	t.Run("persona_command_not_in_history", func(t *testing.T) {
+	t.Run("agent_command_not_in_history", func(t *testing.T) {
 		env := newTestEnv(t, nil, nil)
 		st := env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
 		before := len(st.snapshotHistory(100))
 		ev := groupEvent("g1", "u1", "张三", "hi")
-		ev.Command = &bot.Command{Name: "persona", Args: []string{"status"}}
+		ev.Command = &bot.Command{Name: "agent", Args: []string{"status"}}
 		_ = env.deliver(ev)
 		if !env.cap.has("command") {
 			t.Fatal("want command")
 		}
 		if after := len(st.snapshotHistory(100)); after != before {
-			t.Fatalf("史条数 %d -> %d，/persona 不应进历史", before, after)
+			t.Fatalf("史条数 %d -> %d，/agent 不应进历史", before, after)
 		}
 	})
 	t.Run("empty_text", func(t *testing.T) {

@@ -16,7 +16,7 @@
 | `trigger_keywords` | []string | `[]` | 关键词寻址，大小写不敏感子串匹配；空表示关闭 |
 | `trigger_min_chars` | int | `2` | 短于该长度的文本只记历史不参与（按 rune 计） |
 | `ignore_bots` | bool | `true` | 忽略机器人发送者 |
-| `respond_to_commands` | bool | `false` | 是否允许其它 `/xxx` 命令触发 LLM（`/persona` 永不触发） |
+| `respond_to_commands` | bool | `false` | 是否允许其它 `/xxx` 命令触发 LLM（`/agent` 永不触发） |
 | `group_policy` | string | `open` | 群聊名单模式：`off`（全部不参与）/`open`（全部参与）/`whitelist`（仅 `group_list` 内）/`blacklist`（`group_list` 外） |
 | `group_list` | []string | `[]` | 群聊名单，匹配 `ev.Channel.ID`（频道 ID） |
 | `private_policy` | string | `off` | 私聊名单模式：语义同 `group_policy`，但匹配 `private_list` |

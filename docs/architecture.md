@@ -12,7 +12,7 @@
 - 维护每会话聊天历史，按「人格预设」渲染系统提示词，调用 OpenAI 兼容的 chat completions 接口生成一句话。
 - 用一套可配置的接话决策模型决定「这一轮要不要说话、什么时候说」，包括 @ 寻址必回、私聊必回、随机参与、批处理窗口、冷却、小时配额、静默时段。
 - 用「模式 + 单列表」的名单策略（`off`/`open`/`whitelist`/`blacklist`）按会话类型放行或拒绝：群聊按频道 ID、私聊按发送者 ID（见 [`participation.md`](participation.md) §7.8）。
-- 提供 `/persona` 管理命令切换人格、开关、名单策略与查看状态。
+- 提供 `/agent` 管理命令切换人格、开关、名单策略与查看状态。
 - 用 `bot.Storage` 持久化每会话的运行时覆盖（人格、开关）与插件级名单策略。
 - 通过一个外部 MCP 服务接入工具，由模型按需调用，管理员可刷新工具目录（[`mcp.md`](mcp.md) 第 14 章）。
 
@@ -91,7 +91,7 @@ reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
 reg.OnEvent(bot.EventMessage, p.handlePrivateMessage,
 	bot.WithKind(bot.MessagePrivate), bot.WithPriority(0), bot.WithID("persona:private"))
 
-reg.OnCommand("persona", p.handleCommand,
+reg.OnCommand("agent", p.handleCommand,
 	bot.WithAdmin(), bot.WithPriority(100), bot.WithID("persona:admin"))
 ```
 
@@ -149,7 +149,7 @@ func (p *Plugin) Metadata() bot.Metadata {
 | `map[string]*channelState` | `sync.RWMutex`（挂在 `Plugin` 上） | 读多写少；新增/淘汰会话时写锁 |
 | `channelState` 内部字段 | `channelState.mu sync.Mutex` | 每个会话独立锁，避免全局锁竞争 |
 | 工具目录 | `Plugin.toolsMu sync.RWMutex` | 读取时复制快照；网络和工具调用期间不持锁（[`mcp.md`](mcp.md) §14.6）；客户端另同步会话状态和请求 ID |
-| 全局计数器（`/persona status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
+| 全局计数器（`/agent status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
 | 最近发送消息 ID 环（reply 寻址用） | `sync.Mutex` | 容量常量 128 的环形缓冲 |
 | 写穿透关闭标记 `closing`（配 `writeWG`）、MCP 刷新在途标记 `mcpRefreshing` | 现有 `writeMu sync.Mutex` | 写穿透、刷新任务准入与 `Stop` 用它串行化关闭判定；写穿透由 `writeWG` 跟踪，刷新由 `p.wg` 跟踪（见 §3.1/§4.6、[`mcp.md`](mcp.md) §14.6） |
 
@@ -195,14 +195,14 @@ type channelState struct {
 
 - `history` 环形，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
 - `replyTimes` 只保留近 1 小时（`repliesInWindow` 读取时顺带裁剪）。
-- `epoch` 是「状态代次」：`/persona off`、`/persona switch`、`/persona reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
+- `epoch` 是「状态代次」：`/agent off`、`/agent switch`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
 - `loaded` 表示 Storage 懒加载是否完成。未完成前 Handler 不阻塞等待：把本条消息**暂存进 `pending` 单槽**并记 reason `loading`，加载完成后由 `restoreState` 调 `decide` **补判一次**（见 §4.5）。
-- `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text, epoch}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；`epoch` 变化（`/persona reset`）时暂存作废。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。暂存的是 Handler 收到的 `*bot.Event`：核心入队时已复制事件对象并独占副本（浅拷贝，适配器投递后不得再改 `Message`/`Segments`），插件因此可以安全地把事件留存到 Handler 返回之后（见 §6）。
-- `disabled` 表示该会话被 `/persona off` 关闭。
+- `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text, epoch}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；`epoch` 变化（`/agent reset`）时暂存作废。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。暂存的是 Handler 收到的 `*bot.Event`：核心入队时已复制事件对象并独占副本（浅拷贝，适配器投递后不得再改 `Message`/`Segments`），插件因此可以安全地把事件留存到 Handler 返回之后（见 §6）。
+- `disabled` 表示该会话被 `/agent off` 关闭。
 - `kind` 是会话类型（`bot.MessageGroup` / `bot.MessagePrivate`），决定寻址判定（私聊视为寻址）、发送目标（`message.Group` / `message.Private`）与提示词/历史渲染的会话类型文案。
 - `peerUserID` 是私聊对端用户 ID，私聊发送目标填 `bot.Target.UserID`（`ChannelID` 留空）。
 
-方法名固定为：`appendHistory(Turn)`、`snapshotHistory(max int) []Turn`、`repliesInWindow(now time.Time, d time.Duration) int`、`distinctHumans(now time.Time, d time.Duration) int`。计数器名固定为 `replies`、`skips`、`llmErrors`、`dropped`（另有全局原子计数用于 `/persona status` 的汇总行）。
+方法名固定为：`appendHistory(Turn)`、`snapshotHistory(max int) []Turn`、`repliesInWindow(now time.Time, d time.Duration) int`、`distinctHumans(now time.Time, d time.Duration) int`。计数器名固定为 `replies`、`skips`、`llmErrors`、`dropped`（另有全局原子计数用于 `/agent status` 的汇总行）。
 
 ### 4.2 会话键
 
@@ -228,7 +228,7 @@ type channelState struct {
 首次见到某会话时**异步**触发一次 `Storage.Get`（读该会话的覆盖键）：
 
 - 加载完成前，Handler 只记历史、不判决策：记 reason `loading`，同时把该条消息**暂存进 `channelState.pending` 单槽**（见 §4.1）。Handler 禁止阻塞，因此不能同步等待 `Get`。
-- 加载完成（`finishLoad`）：写回 `persona`、`disabled`，置 `loaded = true`，并在同一临界区内取走 `pending`；取到则用插件级 ctx 调 `decide` **补判一次**（此时判定依据的是加载后的真实打开/关闭状态与人格覆盖，因此不会在 `/persona off` 的会话里发言）。补判只做内存判定与定时器布防，不做网络调用。
+- 加载完成（`finishLoad`）：写回 `persona`、`disabled`，置 `loaded = true`，并在同一临界区内取走 `pending`；取到则用插件级 ctx 调 `decide` **补判一次**（此时判定依据的是加载后的真实打开/关闭状态与人格覆盖，因此不会在 `/agent off` 的会话里发言）。补判只做内存判定与定时器布防，不做网络调用。
 - 效果：新会话（首次出现、进程重启后、被 LRU 淘汰后）的**第一条消息不再被静默吞掉**；加载期间连发的消息只补判最新一条，更早的仍随本轮生成进入 LLM 上下文。
 - 加载失败（含 `bot.ErrNotFound`）：视为无覆盖，同样置 `loaded = true` 并补判，只记 `Debug`/`Warn`。
 - `p.ctx` 为 nil 或 `p.store` 为 nil 时跳过 `Get`，仍然走 `finishLoad`（补判照常生效）。
@@ -266,8 +266,8 @@ kei-plugin-persona/
 ├── vision.go        图片下载与 base64 内联（地址限制、体积上限、格式白名单、失败丢弃）
 ├── tools.go         工具接口、按人格过滤、目录快照与工具调用循环
 ├── mcp.go           MCP 客户端、协议、工具发现、调用与结果转换
-├── commands.go      /persona 管理命令
-├── policy.go        插件级名单策略：模式判定、/persona policy|list 渲染、policy 键读写
+├── commands.go      /agent 管理命令
+├── policy.go        插件级名单策略：模式判定、/agent policy|list 渲染、policy 键读写
 ├── config_test.go   配置解析与校验单测
 ├── decision_test.go 决策模型单测（过滤/寻址/随机/窗口/epoch/名单/私聊）
 ├── llm_test.go      LLM 客户端单测（httptest.Server）
@@ -295,8 +295,8 @@ kei-plugin-persona/
 | `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
 | `tools.go` | `tool` 接口、`toolResult`、按人格过滤 `toolsFor`、目录快照/整体替换、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`mcp.md`](mcp.md) §13.2-13.4。 |
 | `mcp.go` | `mcpClient`/`mcpTool`：初始化、HTTP/SSE、会话、工具列表与调用、结果转换；唯一工具来源，见 [`mcp.md`](mcp.md) 第 14 章。 |
-| `commands.go` | `/persona status|switch|on|off|reset|policy|list|tools` 子命令实现。 |
-| `policy.go` | 插件级名单策略：`policyState`/`policyValue`、四值模式放行判定、`policy` 键读写、`/persona policy|list` 报告渲染。 |
+| `commands.go` | `/agent status|switch|on|off|reset|policy|list|tools` 子命令实现。 |
+| `policy.go` | 插件级名单策略：`policyState`/`policyValue`、四值模式放行判定、`policy` 键读写、`/agent policy|list` 报告渲染。 |
 | `*_test.go` | 按文件名的领域单测；`e2e_test.go` 走 mock 适配器端到端。 |
 
 ## 6. 与 kei 核心的契约对应
@@ -313,13 +313,13 @@ kei-plugin-persona/
 | 传给 `Setup`/`Start`/`Stop` 的 ctx 都是**阶段上下文**：`run` 内 `defer cancel()`，阶段函数一返回就取消。故插件级 ctx 必须由 `context.WithoutCancel` 派生（本插件 `Start` 的做法） | `internal/pluginmgr/manager.go` `run` |
 | `Metadata.Permissions` 决定依赖裁剪：未声明 `network` → `PluginContext.HTTPClient == nil`；未声明 `storage` → 注入拒绝式 `Storage`，其错误可用公开哨兵 `errors.Is(err, bot.ErrPermissionDenied)` 识别；未声明 `send_message` → `BotAPI.Send` 报 `engine: plugin %s lacks permission send_message` | `internal/pluginmgr/manager.go` `contextFor`（`storage.Denied()`）；`internal/engine/pluginapi.go`；`pkg/bot/api.go` `ErrPermissionDenied` |
 | `Metadata` 在装配期被校验：`Name` 必须匹配 `[a-z0-9_-]`、声明 `PermAll` 直接报错；`Metadata.Options` 列出插件接受的私有键，未列出时会记 warn `插件不认识的配置键`（本插件暂不声明 `Options`，故拼错的键仍静默忽略） | `internal/pluginmgr/manager.go` `Add`/`warnUnknownOptions`；`pkg/bot/plugin.go` `Metadata` |
-| `Reply` 所有插件都可用，不受 `send_message` 限制；引擎注入的默认实现会自动在消息首位追加 `SegReply` 引用触发消息（事件带消息 ID 且消息里本没有引用段时），平台不支持引用时该段在降级阶段丢弃——本插件的 `/persona` 命令回复（走 `Reply`）因此都带引用段，聊天回复（走 `BotAPI.Send`）不受影响 | `pkg/bot/reply.go`；`internal/reply/reply.go` `SendResult`；`internal/engine/pluginapi.go`；本插件 `commands.go` |
+| `Reply` 所有插件都可用，不受 `send_message` 限制；引擎注入的默认实现会自动在消息首位追加 `SegReply` 引用触发消息（事件带消息 ID 且消息里本没有引用段时），平台不支持引用时该段在降级阶段丢弃——本插件的 `/agent` 命令回复（走 `Reply`）因此都带引用段，聊天回复（走 `BotAPI.Send`）不受影响 | `pkg/bot/reply.go`；`internal/reply/reply.go` `SendResult`；`internal/engine/pluginapi.go`；本插件 `commands.go` |
 | 需要文件段、本地路径 / 平台文件标识的图片、表情、显式引用或平台发送结果时，用可选接口 `bot.ExtendedReply`（引擎默认实现与 `NoopReply` 都实现它，第三方 `Reply` 实现不保证）——本插件不发送这类段，未使用 | `pkg/bot/reply.go` `ExtendedReply`；`pkg/message/message.go` `FileID` |
 | 本插件申请 `network`/`storage`/`send_message` 三项权限 | `register.go` 的 `Metadata`；权限常量见 `pkg/bot/plugin.go` |
 | `WithKind(bot.MessageGroup)` 只比较 `ev.Message.Kind`；`ev.Message == nil` 时不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
 | `WithKind(bot.MessagePrivate)` 同样只比较 `ev.Message.Kind`，故群聊与私聊各注册一条规则（`persona:group` / `persona:private`），互不命中 | `pkg/bot/registrar.go` `Rule.Matches` |
-| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较；非管理员的事件**不进入** Handler（Auth 在 Timeout 外层同步返回 `ErrUnauthorized`，只记 `Warn` + `decision=denied`），故 `/persona` 对非管理员完全静默 | `docs/plugin.md` §9.2（`WithAdmin` 选项）；`docs/engine.md` §10.5（`isAdmin` 判定）；`docs/configuration.md` §12.1；`internal/middleware/middleware.go` `Auth` |
-| `OnCommand("persona", ...)` 的规则与群消息规则会被**同时执行**（同一事件命中多条规则全部执行，`Priority` 只影响顺序、不短路，错误 `errors.Join` 聚合），故 Handler 必须无条件丢弃 `Command.Name == "persona"` | `internal/router/router.go` `Dispatch` |
+| `WithAdmin()` 需核心 `auth.admin_users` + Auth 中间件，按 `Event.Sender.ID` 精确比较；非管理员的事件**不进入** Handler（Auth 在 Timeout 外层同步返回 `ErrUnauthorized`，只记 `Warn` + `decision=denied`），故 `/agent` 对非管理员完全静默 | `docs/plugin.md` §9.2（`WithAdmin` 选项）；`docs/engine.md` §10.5（`isAdmin` 判定）；`docs/configuration.md` §12.1；`internal/middleware/middleware.go` `Auth` |
+| `OnCommand("agent", ...)` 的规则与群消息规则会被**同时执行**（同一事件命中多条规则全部执行，`Priority` 只影响顺序、不短路，错误 `errors.Join` 聚合），故 Handler 必须无条件丢弃 `Command.Name == "agent"` | `internal/router/router.go` `Dispatch` |
 | 命令前缀默认 `["/"]`，但宿主可经 `engine.command_prefixes`（或 `KEI_ENGINE_COMMAND_PREFIXES`）改成任意前缀，插件不得假设 `/`；`Command{Name,Args,Raw}`，`Name` 不含前缀；带前缀的文本会被填 `ev.Command` | `internal/router/router.go` `Dispatch`（填充点）；`internal/engine/engine.go`（默认前缀）；`pkg/bot/event.go` `ParseCommand` |
 | Handler 运行在事件总线分片 worker 中：同会话串行、不同会话并行（默认 4 worker × 256 队列，可经 `engine.bus_workers`/`engine.bus_queue_size` 调整）；核心在入队时复制事件对象并独占副本，故 Handler 返回后插件仍可安全引用收到的 `*bot.Event`（适配器不得再改其中的 `Message`/`Segments`） | `docs/engine.md` §7.5/§8.4；`internal/eventbus/bus.go` `Publish` |
 | `RuleTimeout` 默认 10s、`EventTimeout` 默认 30s（可经 `engine.rule_timeout`/`engine.event_timeout` 调整）；超时只让框架不再等待，Handler 必须响应 ctx 取消，否则占用 worker 到返回为止（核心记 `Warn` 与 `kei_rule_overruns_total`） | `internal/engine/engine.go`；`internal/middleware/middleware.go` `Timeout` |
@@ -338,4 +338,4 @@ kei-plugin-persona/
 | 插件拿到的 `Storage` 是**按插件名隔离的视图**：`PluginContext.Storage` 与 `BotAPI.Storage()` 都带 `plugin:persona:` 前缀（插件传逻辑键，不自己拼前缀）；键长上限 191 字节**按含前缀的底层键**执行，超长时三个内置后端统一报错 | `internal/storage/namespace.go` `PluginScoped`；`internal/storage/key.go` `MaxKeyBytes`；`docs/plugin.md` §11.2 |
 | `bot.Storage` 的后端由宿主选择：配置 `storage.type`（`memory` 默认 / `sqlite` / `mysql`）或 `kei.Options.Storage` 注入（非 nil 优先、由调用方拥有、`Run` 不关闭）；插件只见接口，各后端读写语义一致。`sqlite`/`mysql` 需宿主空导入 `github.com/RandomLemon/kei/pkg/kei/sql`，否则装配期报未知存储类型 | `pkg/kei/assemble.go` `buildStorage`；`pkg/kei/kei.go` `Options.Storage`；`pkg/kei/sql`；`internal/storage`；`docs/plugin.md` §11.2；`docs/configuration.md` §12.5 |
 | `Storage.Set` 的 `ttl <= 0` 表示永不过期（本插件一律传 `0`）；内存后端重启即丢、持久后端保留（见 §4.7） | `pkg/bot/api.go`；`docs/plugin.md` §11.2 |
-| 核心仅暴露自身指标（Prometheus 文本），插件的观测面是 `/persona status` 与结构化日志；与插件相关的核心指标是 `kei_events_handled_total{plugin,rule,result}`、`kei_rules_matched_total`、`kei_rule_overruns_total`（Handler 超过 `engine.rule_timeout`）与 `kei_messages_sent_total`，plugin 标签值为 `persona`；核心还会在 `Info` 记录每条收发消息的正文（`log.level` 控制），不可由插件关闭 | `internal/metrics`；`docs/engine.md` §10.5；[`persona.md`](persona.md) §8.4、[`participation.md`](participation.md) §7.7 |
+| 核心仅暴露自身指标（Prometheus 文本），插件的观测面是 `/agent status` 与结构化日志；与插件相关的核心指标是 `kei_events_handled_total{plugin,rule,result}`、`kei_rules_matched_total`、`kei_rule_overruns_total`（Handler 超过 `engine.rule_timeout`）与 `kei_messages_sent_total`，plugin 标签值为 `persona`；核心还会在 `Info` 记录每条收发消息的正文（`log.level` 控制），不可由插件关闭 | `internal/metrics`；`docs/engine.md` §10.5；[`persona.md`](persona.md) §8.4、[`participation.md`](participation.md) §7.7 |
