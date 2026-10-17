@@ -402,6 +402,87 @@ func TestAddressedAndCooldown(t *testing.T) {
 	})
 }
 
+// TestSystemPromptByRound 回归：寻址轮次（@ / 私聊）的系统提示词是「必须回一句」版本，
+// 不向模型提供 skip 出口；只有随机轮次的提示词才允许输出哨兵。
+func TestSystemPromptByRound(t *testing.T) {
+	captureSystem := func(got chan string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Messages []map[string]any `json:"messages"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Messages) > 0 {
+				if s, ok := body.Messages[0]["content"].(string); ok {
+					select {
+					case got <- s:
+					default:
+					}
+				}
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"打球可以啊"}}]}`))
+		}
+	}
+	systemPrompt := func(t *testing.T, env *testEnv, got chan string) string {
+		t.Helper()
+		if !env.waitSends(1, 2*time.Second) {
+			t.Fatal("应触发一次回复")
+		}
+		select {
+		case s := <-got:
+			return s
+		case <-time.After(time.Second):
+			t.Fatal("未捕获 system 提示词")
+			return ""
+		}
+	}
+	const mustReplyBlock = "\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n"
+
+	t.Run("via_at", func(t *testing.T) {
+		got := make(chan string, 1)
+		env := newTestEnv(t, captureSystem(got), fastConfig)
+		env.waitLoaded(atEvent("g1", "u1", "张三", "hi"))
+		_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+		sys := systemPrompt(t, env, got)
+		if !strings.Contains(sys, mustReplyBlock) {
+			t.Fatalf("被 @ 的提示词缺少必须回复块:\n%s", sys)
+		}
+		if strings.Contains(sys, "决定不插话时") {
+			t.Fatalf("被 @ 的提示词不应提供 skip 出口:\n%s", sys)
+		}
+	})
+
+	t.Run("private", func(t *testing.T) {
+		got := make(chan string, 1)
+		env := newTestEnv(t, captureSystem(got), func(c map[string]any) {
+			fastConfig(c)
+			c["private_policy"] = "open"
+		})
+		env.waitLoaded(privateEvent("u1", "张三", "hi"))
+		_ = env.deliverPrivate(privateEvent("u1", "张三", "在吗"))
+		sys := systemPrompt(t, env, got)
+		if !strings.Contains(sys, mustReplyBlock) {
+			t.Fatalf("私聊的提示词缺少必须回复块:\n%s", sys)
+		}
+		if strings.Contains(sys, "决定不插话时") {
+			t.Fatalf("私聊的提示词不应提供 skip 出口:\n%s", sys)
+		}
+	})
+
+	t.Run("random", func(t *testing.T) {
+		got := make(chan string, 1)
+		env := newTestEnv(t, captureSystem(got), fastConfig)
+		env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+		_ = env.deliver(groupEvent("g1", "u1", "张三", "在吗"))
+		sys := systemPrompt(t, env, got)
+		if !strings.Contains(sys, "\n# 本轮要求\n- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。\n- 决定不插话时，只输出 [SKIP]，不要输出其他任何内容。\n") {
+			t.Fatalf("随机轮次的提示词缺少哨兵出口:\n%s", sys)
+		}
+		if strings.Contains(sys, "你必须回一句") {
+			t.Fatalf("随机轮次不应要求必须回复:\n%s", sys)
+		}
+	})
+}
+
 func TestReplyMentionSender(t *testing.T) {
 	env := newTestEnv(t, nil, func(c map[string]any) {
 		fastConfig(c)

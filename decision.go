@@ -341,10 +341,14 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	personaName, _ := p.resolvePersona(st)
 	pf := p.cfg.personas[personaName]
 
+	// 寻址轮次（私聊、@/引用本机器人、命中 trigger_keywords）必须回复：
+	// 提示词走不提供 skip 出口的版本（docs/persona.md §8.5），随机轮次才允许沉默。
+	mustReply := pendingKind == "addressed"
+
 	trimmed := p.trimHistory(history)
 	slots := p.fetchVisionSlots(p.ctx, p.selectVisionSlots(trimmed))
 	req := completionRequest{
-		System:      p.renderSystemPrompt(personaName, st, history),
+		System:      p.renderSystemPrompt(personaName, st, history, mustReply),
 		User:        p.renderUserContent(chatKind, trimmed, slots),
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
