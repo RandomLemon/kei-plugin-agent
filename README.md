@@ -86,7 +86,7 @@ plugins:
 | 子命令 | 行为 |
 | --- | --- |
 | `/agent status` | 输出开关、当前人格与来源、历史条数、小时配额、错误/跳过计数 |
-| `/agent switch [name]` | 查看或切换当前会话人格（写运行时覆盖并持久化） |
+| `/agent persona [name]` | 无参数时列出当前人格与全部预设；带 `name` 时切换当前会话人格（写运行时覆盖并持久化） |
 | `/agent on` / `off` / `reset` | 开关本会话 / 清历史与覆盖 |
 | `/agent policy [group\|private mode]` | 查看或设置名单模式 |
 | `/agent list [group\|private [add\|del id]]` | 查看或增删名单项 |

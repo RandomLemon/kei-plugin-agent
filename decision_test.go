@@ -609,16 +609,16 @@ func TestStatusAndPersonaCommands(t *testing.T) {
 	if got := env.command("status"); got != "persona: 开 · persona=default(default) · 历史 0 条 · 近 1 小时回复 0/6 · 上次回复 从未 · llm 错误 0 · 已跳 0" {
 		t.Fatalf("status = %q", got)
 	}
-	if got := env.command("switch"); got != "persona: persona=default 来源=default" {
+	if got := env.command("persona"); got != "persona: persona=default 来源=default · 预设=[default tsundere]" {
 		t.Fatalf("persona = %q", got)
 	}
-	if got := env.command("switch", "tsundere"); got != "persona: persona=tsundere" {
+	if got := env.command("persona", "tsundere"); got != "persona: persona=tsundere" {
 		t.Fatalf("persona set = %q", got)
 	}
-	if got := env.command("switch"); got != "persona: persona=tsundere 来源=override" {
+	if got := env.command("persona"); got != "persona: persona=tsundere 来源=override · 预设=[default tsundere]" {
 		t.Fatalf("persona after set = %q", got)
 	}
-	if got := env.command("switch", "nope"); got != "persona: 未找到人格 nope" {
+	if got := env.command("persona", "nope"); got != "persona: 未找到人格 nope" {
 		t.Fatalf("persona unknown = %q", got)
 	}
 	if got := env.command("bogus"); got != personaUsage() {
@@ -644,6 +644,20 @@ func TestStatusAndPersonaCommands(t *testing.T) {
 	v, ok := env.store.value(key)
 	if !ok || !containsStr(v, "tsundere") {
 		t.Fatalf("override 未持久化: %q ok=%v", v, ok)
+	}
+}
+
+func TestPersonaCommandListsPresetsSorted(t *testing.T) {
+	env := newTestEnv(t, nil, func(cfg map[string]any) {
+		personas := cfg["personas"].(map[string]any)
+		personas["zeta"] = "最后"
+		personas["alpha"] = "最前"
+		personas["mid"] = "中间"
+	})
+	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+
+	if got := env.command("persona"); got != "persona: persona=default 来源=default · 预设=[alpha default mid tsundere zeta]" {
+		t.Fatalf("persona = %q", got)
 	}
 }
 

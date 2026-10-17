@@ -195,7 +195,7 @@ type channelState struct {
 
 - `history` 环形，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
 - `replyTimes` 只保留近 1 小时（`repliesInWindow` 读取时顺带裁剪）。
-- `epoch` 是「状态代次」：`/agent off`、`/agent switch`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
+- `epoch` 是「状态代次」：`/agent off`、`/agent persona`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
 - `loaded` 表示 Storage 懒加载是否完成。未完成前 Handler 不阻塞等待：把本条消息**暂存进 `pending` 单槽**并记 reason `loading`，加载完成后由 `restoreState` 调 `decide` **补判一次**（见 §4.5）。
 - `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text, epoch}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；`epoch` 变化（`/agent reset`）时暂存作废。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。暂存的是 Handler 收到的 `*bot.Event`：核心入队时已复制事件对象并独占副本（浅拷贝，适配器投递后不得再改 `Message`/`Segments`），插件因此可以安全地把事件留存到 Handler 返回之后（见 §6）。
 - `disabled` 表示该会话被 `/agent off` 关闭。
@@ -295,7 +295,7 @@ kei-plugin-persona/
 | `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
 | `tools.go` | `tool` 接口、`toolResult`、按人格过滤 `toolsFor`、目录快照/整体替换、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`mcp.md`](mcp.md) §13.2-13.4。 |
 | `mcp.go` | `mcpClient`/`mcpTool`：初始化、HTTP/SSE、会话、工具列表与调用、结果转换；唯一工具来源，见 [`mcp.md`](mcp.md) 第 14 章。 |
-| `commands.go` | `/agent status|switch|on|off|reset|policy|list|tools` 子命令实现。 |
+| `commands.go` | `/agent status|persona|on|off|reset|policy|list|tools` 子命令实现。 |
 | `policy.go` | 插件级名单策略：`policyState`/`policyValue`、四值模式放行判定、`policy` 键读写、`/agent policy|list` 报告渲染。 |
 | `*_test.go` | 按文件名的领域单测；`e2e_test.go` 走 mock 适配器端到端。 |
 

@@ -3,6 +3,7 @@ package persona
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func personaUsage() string {
-	return "用法: /agent status | switch [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
+	return "用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
 }
 
 // handleCommand 处理 /agent 管理命令。
@@ -31,10 +32,9 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 	switch args[0] {
 	case "status":
 		return r.Text(p.statusLine(st)).Send(ctx)
-	case "switch":
+	case "persona":
 		if len(args) == 1 {
-			name, src := p.resolvePersona(st)
-			return r.Text(fmt.Sprintf("persona: persona=%s 来源=%s", name, src)).Send(ctx)
+			return r.Text(p.personaReport(st)).Send(ctx)
 		}
 		name := args[1]
 		if _, ok := p.cfg.personas[name]; !ok {
@@ -171,6 +171,17 @@ func (p *Plugin) reloadMCPTools(target bot.Target) {
 	if _, err := p.api.Send(ctx, target, msg); err != nil {
 		p.log.Warn("persona: MCP 刷新通知发送失败", "operation", "mcp_reload", "err", err)
 	}
+}
+
+// personaReport 生成 /agent persona 的固定格式一行：当前生效人格、来源与全部预设。
+func (p *Plugin) personaReport(st *channelState) string {
+	name, src := p.resolvePersona(st)
+	names := make([]string, 0, len(p.cfg.personas))
+	for preset := range p.cfg.personas {
+		names = append(names, preset)
+	}
+	slices.Sort(names)
+	return fmt.Sprintf("persona: persona=%s 来源=%s · 预设=[%s]", name, src, strings.Join(names, " "))
 }
 
 // statusLine 生成 /agent status 的固定格式一行。

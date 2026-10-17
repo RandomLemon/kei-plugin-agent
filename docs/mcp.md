@@ -94,7 +94,7 @@ runTool(tools, i, call) toolResult:            # 循环层兜底，对所有工�
 - **未知工具**：模型调用了不在当前人格可用列表里的工具（含幻觉出的名字）时返回未知工具文本，不执行。
 - **顺序执行**：同一轮的多个调用串行执行，工具调用本身不额外起协程（[`architecture.md`](architecture.md) §3.2）。
 - **信号量**：整个循环都在 `generate` 已持有的全局信号量内完成，工具调用不额外占用或释放并发名额。
-- **epoch**：每轮执行工具前检查 `st.epoch`；会话期间被 `/agent off|switch|reset` 时立即放弃，reason `stale`，不再浪费工具与 LLM 请求。发送前的 epoch 复核（§7.6）保持不变。
+- **epoch**：每轮执行工具前检查 `st.epoch`；会话期间被 `/agent off|persona|reset` 时立即放弃，reason `stale`，不再浪费工具与 LLM 请求。发送前的 epoch 复核（§7.6）保持不变。
 - **ctx**：工具调用一律用插件级 `p.ctx` 派生，禁止 Handler ctx 与 `context.Background()`。`Stop` 取消 `p.ctx` 后循环在当前请求返回时退出。
 - **耗时上界**：`(tools_max_rounds + 1) × LLM 单次上界（llm.md §9.3） + tools_max_rounds × maxToolCallsPerRound × tools_call_timeout`。默认值下约为 `3 × 40s + 2 × 3 × 8s`，均脱离 Handler，不受 `RuleTimeout`/`EventTimeout` 约束。
 - **清洗与发送**：循环返回的 `content` 照常走回复清洗管线（[`persona.md`](persona.md) §8.7），reason 词表不变（[`participation.md`](participation.md) §7.7）。清洗会压平换行并按 `reply_max_chars` 截断，资料类人格宜只回答关键步骤并附链接。
