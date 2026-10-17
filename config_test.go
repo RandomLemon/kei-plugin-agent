@@ -30,6 +30,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 		{"llm_timeout", cfg.llmTimeout, 20 * time.Second},
 		{"llm_max_retries", cfg.llmMaxRetries, 1},
 		{"llm_skip_token", cfg.llmSkipToken, "[SKIP]"},
+		{"llm_skip_enabled", cfg.llmSkipEnabled, true},
 		{"llm_history_max_chars", cfg.llmHistoryMaxChars, 4000},
 		{"trigger_min_chars", cfg.triggerMinChars, 2},
 		{"ignore_bots", cfg.ignoreBots, true},
@@ -82,6 +83,20 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.randomTimezone == nil {
 		t.Error("randomTimezone 未解析")
+	}
+}
+
+func TestLoadConfigSkipDisabled(t *testing.T) {
+	cfg, err := loadConfig(bot.NewConfig(map[string]any{
+		"personas":         map[string]any{"default": "普通群友"},
+		"llm_model":        "m",
+		"llm_skip_enabled": false,
+	}))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.llmSkipEnabled {
+		t.Fatal("llm_skip_enabled=false 未生效")
 	}
 }
 

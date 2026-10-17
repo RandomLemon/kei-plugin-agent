@@ -30,11 +30,15 @@ const defaultPersonaTemplate = `你正在一个{{chat_kind}}里聊天。
 
 // replyRule 返回追加在系统提示词末尾的本轮要求块（逐字见 docs/persona.md §8.5）。
 //
-// mustReply 为真（寻址轮次：私聊、@/引用本机器人、命中 trigger_keywords）时必须回一句，
-// 不向模型提供 skip 出口；为假（随机轮次）才允许输出 skipToken 表示不接话。
-func replyRule(skipToken string, mustReply bool) string {
+// mustReply 为真（寻址轮次：私聊、@/引用本机器人、命中 trigger_keywords）时必须回一句；
+// skipEnabled 为假（llm_skip_enabled=false）时随机轮次同样不提供 skip 出口。
+// 只有 mustReply 与 skipEnabled 都为假时才允许输出 skipToken 表示不接话。
+func replyRule(skipToken string, mustReply, skipEnabled bool) string {
 	if mustReply {
 		return "\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 " + skipToken + "。\n"
+	}
+	if !skipEnabled {
+		return "\n# 本轮要求\n- 无论对方在聊什么，你都必须回一句；不要输出 " + skipToken + "。\n"
 	}
 	return "\n# 本轮要求\n- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。\n" +
 		"- 决定不插话时，只输出 " + skipToken + "，不要输出其他任何内容。\n"
@@ -101,7 +105,7 @@ func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, histor
 	if tmpl == "" {
 		tmpl = defaultPersonaTemplate
 	}
-	return repl.Replace(tmpl) + replyRule(pf.SkipToken, mustReply)
+	return repl.Replace(tmpl) + replyRule(pf.SkipToken, mustReply, p.cfg.llmSkipEnabled)
 }
 
 // turnName 返回历史的显示名：Name → UserID → "未知"。

@@ -104,6 +104,7 @@ type config struct {
 	llmTimeout              time.Duration
 	llmMaxRetries           int
 	llmSkipToken            string
+	llmSkipEnabled          bool
 	llmHistoryMaxChars      int
 	llmExtraHeaders         map[string]string
 	llmVisionEnabled        bool
@@ -138,6 +139,7 @@ func loadConfig(c *bot.Config) (*config, error) {
 	cfg.llmAPIKey = r.str("llm_api_key", "")
 	cfg.llmModel = r.str("llm_model", "")
 	cfg.llmSkipToken = r.str("llm_skip_token", defaultSkipToken)
+	cfg.llmSkipEnabled = r.boolean("llm_skip_enabled", true)
 	cfg.llmTimeout = r.dur("llm_timeout", 20*time.Second)
 	cfg.llmExtraHeaders = readHeaders(c)
 

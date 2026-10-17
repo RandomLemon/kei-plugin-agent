@@ -43,6 +43,7 @@
 | `llm_timeout` | duration | `20s` | 单次请求超时 |
 | `llm_max_retries` | int | `1` | 429/5xx/网络错误的重试次数 |
 | `llm_skip_token` | string | `[SKIP]` | 「不插话」哨兵 |
+| `llm_skip_enabled` | bool | `true` | 是否允许随机轮次输出 skip 哨兵不接话；`false` 时所有轮次都要求回复。哨兵仍按清洗管线丢弃，防止外发 |
 | `llm_history_max_chars` | int | `4000` | 输入历史字符上限（rune） |
 | `llm_extra_headers` | map[string]string | `{}` | 额外请求头（中继服务用） |
 | `reply_max_chars` | int | `200` | 单条回复字符上限（rune） |
@@ -89,7 +90,8 @@ plugins:
 
     default_persona: "default"
     # 系统提示词模板（占位符见 docs/persona.md §8.5）。「本轮能否输出 {{skip_token}} 不接话」
-    # 由插件按轮次追加在渲染结果末尾，模板不必写；此处若自带同类写法，寻址轮次下以追加块为准。
+    # 由插件按轮次与 llm_skip_enabled 追加在渲染结果末尾，模板不必写；此处若自带同类写法，
+    # 与追加块冲突时以追加块为准。
     persona_template: |
       你正在一个群聊里聊天。
 
@@ -154,6 +156,7 @@ plugins:
     llm_timeout: "20s"
     llm_max_retries: 1
     llm_skip_token: "[SKIP]"
+    llm_skip_enabled: true
     llm_history_max_chars: 4000
     llm_extra_headers: {}
     llm_vision_enabled: false     # 开启后需配视觉模型（如 gpt-4o-mini）
@@ -298,6 +301,7 @@ persona: 配置错误 personas.helper.tools=mcp__search_manual: 未启用 MCP
 | `llm_timeout` | 必须 >= 0 |
 | `llm_max_retries` | 必须 >= 0 |
 | `llm_skip_token` | 不能为空 |
+| `llm_skip_enabled` | 无额外校验 |
 | `llm_history_max_chars` | 必须 >= 1 |
 | `llm_extra_headers` | 无额外校验 |
 | `reply_max_chars` | 必须 >= 1 |

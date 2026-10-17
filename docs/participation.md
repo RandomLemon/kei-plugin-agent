@@ -95,7 +95,7 @@ addressed = 私聊 || mention || reply_to_self || keyword
 
 ## 7.5 生成与发送
 
-- **本轮要求块**：系统提示词按轮次二选一——`st.pendingKind == "addressed"`（私聊、@ 本机器人、引用本机器人、命中 `trigger_keywords`）时追加**必须回一句、不要输出哨兵**的块；随机轮次追加的块才允许输出哨兵（逐字文本见 [`persona.md`](persona.md) §8.5）。因此被 @ 与私聊**不向模型提供 skip 出口**；模型若仍输出哨兵，按 [`persona.md`](persona.md) §8.7 清洗管线第 3 步丢弃（`skipped_by_llm`），不把哨兵文本当回复发出。
+- **本轮要求块**：系统提示词按轮次与 `llm_skip_enabled` 生成——`st.pendingKind == "addressed"`（私聊、@ 本机器人、引用本机器人、命中 `trigger_keywords`）时追加**必须回一句、不要输出哨兵**的块；随机轮次在 `llm_skip_enabled=true`（默认）时追加允许输出哨兵的块，关闭时追加同样的必须回一句块（逐字文本见 [`persona.md`](persona.md) §8.5）。因此被 @、私聊，以及关闭开关后的随机轮次都**不向模型提供 skip 出口**；模型若仍输出哨兵，按 [`persona.md`](persona.md) §8.7 清洗管线第 3 步丢弃（`skipped_by_llm`），不把哨兵文本当回复发出。
 - **信号量**：全局 `limits_max_concurrent`（默认 2），`TryAcquire` 非阻塞获取；失败记 `semaphore_full`，丢弃本轮，不排队。获取成功 `defer Release`。
 - **epoch 机制**：生成协程捕获发起时的 `epoch`。`/agent off`、`/agent persona`、`/agent reset` 会递增 `epoch`；回调或生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」。
 - **发送**：按会话类型分派，**不用** `TargetFromEvent`：
@@ -208,6 +208,7 @@ generate(st, epoch, history):
   st.mu.Unlock()
 
   mustReply = (pendingKind == "addressed")          # 私聊/@/引用/关键词：提示词不提供 skip 出口（persona.md §8.5）
+                                                     # llm_skip_enabled=false 时随机轮次也无 skip 出口（选块在 renderSystemPrompt 内）
   trimmed = p.trimHistory(history)                  # 与文本裁剪同一结果，图片槽位与之一一对应
   slots   = p.fetchVisionSlots(p.ctx, p.selectVisionSlots(trimmed))  # 关闭视觉或无图时为 nil；失败槽位留空
   req = completionRequest{

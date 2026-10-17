@@ -70,7 +70,7 @@ go test -race ./...
 | 批处理窗口合并（`batch_window=50ms`，真实定时器） | 窗口内多条消息合并为**一次**生成；`batch_max_window` 上限生效 |
 | `st.epoch` 变化（`/agent off` 后定时器回调） | 在途结果被丢弃，`reason=stale`，不发送 |
 | 全局信号量占满（`limits_max_concurrent=1` 且已有在途） | `reason=semaphore_full`，不排队 |
-| LLM 返回 skip token | `reason=skipped_by_llm` |
+| LLM 返回 skip token（无论 `llm_skip_enabled`） | `reason=skipped_by_llm` |
 | LLM 返回空串 | `reason=empty_reply` |
 | LLM 返回与最近自己发言重复且 `reply_dedupe=true` | `reason=duplicate_reply` |
 | 发送失败 | `reason=send_error`，不重排、不重发 |
@@ -79,6 +79,7 @@ go test -race ./...
 | 模板含未知占位符（如 `{{unknown}}`） | 原样保留 |
 | 寻址轮次（@ / 私聊）的请求 `system` | 渲染结果末尾追加寻址版本轮要求块：含「你必须回一句；不要输出 `<skip_token>`」、不含「决定不插话时」 |
 | 随机轮次的请求 `system` | 末尾追加随机版本轮要求块：含「决定不插话时，只输出 `<skip_token>`」、不含「你必须回一句」 |
+| `llm_skip_enabled=false` 的随机轮次请求 `system` | 末尾追加必须回复块：含「无论对方在聊什么，你都必须回一句」、不含「决定不插话时」 |
 | 历史渲染 6 种回落 | `[图片]` / `[表情]` / `[文件]` / `[卡片]` / `[引用]` / `[消息]` 分别命中；`[图片]` 亦为图文混排里每个图片段的内联占位（多图多占位） |
 | 历史块头按会话类型 | 群聊 `[群聊记录]`、私聊 `[私聊记录]` |
 | 历史裁剪 | 超 `context_max_messages` 或 `llm_history_max_chars`（rune）从最旧丢弃，保留最新一条 |

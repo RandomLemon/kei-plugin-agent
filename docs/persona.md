@@ -183,9 +183,9 @@ persona: persona=tsundere 来源=override · 预设=[default tsundere]
 
 **本轮要求块（追加在渲染结果末尾，模板不可覆盖）**
 
-`system` 的最终内容 = `persona_template` 渲染结果 + 本轮要求块，两者之间空一行。块由插件按轮次生成：**寻址轮次**（私聊 / @ 本机器人 / 引用本机器人 / 命中 `trigger_keywords`，轮次判定见 [`participation.md`](participation.md) §7.5）不向模型提供 skip 出口，必须回一句；**随机轮次**才允许输出哨兵。模板自带的同类写法（如「决定不插话时，只输出 `{{skip_token}}`」）在寻址轮次下与块冲突时**以块为准**。
+`system` 的最终内容 = `persona_template` 渲染结果 + 本轮要求块，两者之间空一行。块由插件按轮次与 `llm_skip_enabled` 生成：**寻址轮次**（私聊 / @ 本机器人 / 引用本机器人 / 命中 `trigger_keywords`，轮次判定见 [`participation.md`](participation.md) §7.5）无论开关如何都不向模型提供 skip 出口，必须回一句；**随机轮次**仅在 `llm_skip_enabled=true`（默认）时允许输出哨兵，关闭时同样必须回一句。模板自带的同类写法（如「决定不插话时，只输出 `{{skip_token}}`」）与块冲突时**以块为准**。
 
-两种取值的逐字文本（`<skip>` = 当前人格生效的 skip 哨兵；块以 `\n` 开头、以 `\n` 结尾）：
+三种取值的逐字文本（`<skip>` = 当前人格生效的 skip 哨兵；块以 `\n` 开头、以 `\n` 结尾）：
 
 寻址轮次：
 
@@ -194,13 +194,22 @@ persona: persona=tsundere 来源=override · 预设=[default tsundere]
 - 有人正在直接跟你说话，你必须回一句；不要输出 <skip>。
 ```
 
-随机轮次：
+随机轮次（`llm_skip_enabled=true`）：
 
 ```text
 # 本轮要求
 - 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。
 - 决定不插话时，只输出 <skip>，不要输出其他任何内容。
 ```
+
+随机轮次（`llm_skip_enabled=false`）：
+
+```text
+# 本轮要求
+- 无论对方在聊什么，你都必须回一句；不要输出 <skip>。
+```
+
+`llm_skip_enabled=false` 只关闭提示词中的 skip 出口；模型若仍输出哨兵（例如自定义模板自带该写法），清洗管线第 3 步仍会丢弃（§8.7），避免哨兵文本被发到聊天里。
 
 ## 8.6 历史渲染
 

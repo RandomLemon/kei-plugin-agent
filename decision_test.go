@@ -481,6 +481,23 @@ func TestSystemPromptByRound(t *testing.T) {
 			t.Fatalf("随机轮次不应要求必须回复:\n%s", sys)
 		}
 	})
+
+	t.Run("random_skip_disabled", func(t *testing.T) {
+		got := make(chan string, 1)
+		env := newTestEnv(t, captureSystem(got), func(c map[string]any) {
+			fastConfig(c)
+			c["llm_skip_enabled"] = false
+		})
+		env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+		_ = env.deliver(groupEvent("g1", "u1", "张三", "在吗"))
+		sys := systemPrompt(t, env, got)
+		if !strings.Contains(sys, "\n# 本轮要求\n- 无论对方在聊什么，你都必须回一句；不要输出 [SKIP]。\n") {
+			t.Fatalf("关闭 skip 后随机轮次缺少必须回复块:\n%s", sys)
+		}
+		if strings.Contains(sys, "决定不插话时") {
+			t.Fatalf("关闭 skip 后随机轮次不应提供 skip 出口:\n%s", sys)
+		}
+	})
 }
 
 func TestReplyMentionSender(t *testing.T) {

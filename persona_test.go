@@ -208,20 +208,26 @@ func TestRenderSystemPrompt(t *testing.T) {
 	env.fixNow(time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC))
 
 	env.p.cfg.personaTemplate = "A{{persona}}|B{{persona_name}}|C{{channel_name}}|D{{channel_id}}|E{{platform}}|F{{bot_name}}|G{{now}}|H{{last_sender}}|I{{max_chars}}|J{{skip_token}}|K{{unknown}}|L{{chat_kind}}"
+	const base = "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}|L群聊"
 	// 寻址轮次：追加寻址版本轮要求块（不提供 skip 出口）。
 	got := env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), true)
-	want := "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}|L群聊" +
-		"\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n"
+	want := base + "\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n"
 	if got != want {
 		t.Fatalf("renderSystemPrompt =\n%q\nwant\n%q", got, want)
 	}
 	// 随机轮次：追加允许输出哨兵的版本。
 	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false)
-	want = "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}|L群聊" +
-		"\n# 本轮要求\n- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。\n" +
+	want = base + "\n# 本轮要求\n- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。\n" +
 		"- 决定不插话时，只输出 [SKIP]，不要输出其他任何内容。\n"
 	if got != want {
 		t.Fatalf("renderSystemPrompt(random) =\n%q\nwant\n%q", got, want)
+	}
+	// 关闭 llm_skip_enabled 后，随机轮次也要求必须回复，不提供哨兵出口。
+	env.p.cfg.llmSkipEnabled = false
+	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false)
+	want = base + "\n# 本轮要求\n- 无论对方在聊什么，你都必须回一句；不要输出 [SKIP]。\n"
+	if got != want {
+		t.Fatalf("renderSystemPrompt(random, skip disabled) =\n%q\nwant\n%q", got, want)
 	}
 }
 

@@ -342,7 +342,8 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	pf := p.cfg.personas[personaName]
 
 	// 寻址轮次（私聊、@/引用本机器人、命中 trigger_keywords）必须回复：
-	// 提示词走不提供 skip 出口的版本（docs/persona.md §8.5），随机轮次才允许沉默。
+	// 提示词走不提供 skip 出口的版本（docs/persona.md §8.5）；随机轮次仅在
+	// llm_skip_enabled=true 时才允许沉默。
 	mustReply := pendingKind == "addressed"
 
 	trimmed := p.trimHistory(history)
