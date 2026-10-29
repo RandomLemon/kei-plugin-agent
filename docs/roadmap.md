@@ -26,7 +26,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 ### P2 决策
 
 - `decision.go`：过滤、寻址判定、随机参与、批处理定时器（`onGroupMessage`/`schedule`/`onBatch`）。
-- `state.go`：`channelState`、历史环、计数器、LRU、`st.epoch`、定时器管理。
+- `state.go`：`channelState`、有界历史、计数器、LRU、`st.epoch`、定时器管理。
 - [`testing.md`](testing.md) §11.2 的决策类用例（reason 词表、寻址三种来源、概率边界、冷却/配额、静默时段、窗口合并、`st.epoch`）。
 
 ### P3 LLM
@@ -43,7 +43,7 @@ P1-P7 保留为实现顺序记录；MCP 接入接续为 P8、P9。每阶段的�
 
 ### P5 持久化与联调
 
-- Storage 懒加载（异步；未完成时把入站消息暂存进 `pending` 单槽、加载完成后补判，避免新会话第一条消息被丢弃，见 [`architecture.md`](architecture.md) §4.5）与写穿透（异步，1s 超时，失败 warn）。
+- Storage 懒加载（异步；未完成时把入站消息暂存进 `pending` 单槽、加载完成后补判，避免新会话第一条消息被丢弃，见 [`architecture.md`](architecture.md) §4.5）与写穿透（单写协程按提交顺序串行，1s 超时，失败 warn）。
 - mock 适配器端到端（[`testing.md`](testing.md) §11.3）。
 - 竞态与优雅关闭测试（[`testing.md`](testing.md) §11.4）。
 

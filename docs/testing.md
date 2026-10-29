@@ -68,7 +68,13 @@ go test -race ./...
 | `random_quiet_hours` 跨零点（如 `23:00-07:00`，注入 `p.now`） | 窗口内 `reason=quiet_hours`，窗口外放行 |
 | `random_timezone` 影响 `{{now}}` 与静默判定 | 注入不同时区，静默判定边界随之移动 |
 | 批处理窗口合并（`batch_window=50ms`，真实定时器） | 窗口内多条消息合并为**一次**生成；`batch_max_window` 上限生效 |
-| `st.epoch` 变化（`/agent off` 后定时器回调） | 在途结果被丢弃，`reason=stale`，不发送 |
+| `st.epoch` 变化（`/agent off\|persona\|reset` 后定时器回调） | 旧回调因 `timerSeq` 失效，不生成、不发送；生成中的在途结果被丢弃，`reason=stale` |
+| `/agent persona` 或 `off` 发生在批处理等待中 | 批处理被失效，`awaiting` 清零；随后随机消息仍能正常排程（不永久 `inflight`） |
+| 寻址消息在生成在途时到达 | 本轮被保留并按 100ms 重试；首轮完成后补一轮，且两轮分别 @ 各自发送者 |
+| `Stop` 发生在批处理等待/已触发回调时 | 批处理失效、`timer` 清空；Stop 后旧 `onBatch` 不重新布防、不新增 `wg` 任务 |
+| LRU 达到 `context_max_channels` | 淘汰最久未使用的旧会话；刚创建、`inflight`/`awaiting`、有 `pending` 或正在 Handler 内处理的会话保留 |
+| 懒加载期间 `/agent off\|persona\|reset` | 旧快照逐字段合并、不覆盖命令改过的字段；`off` 的暂存消息补判为 `channel_off`，`persona` 的暂存消息用新人格回复，`reset` 清空暂存；合并后的覆盖写穿透落库 |
+| 懒加载期间修改名单策略 | `finishLoad` 补判前重新检查策略；拒绝时 `reason=not_allowed`，不发送 |
 | 全局信号量占满（`limits_max_concurrent=1` 且已有在途） | `reason=semaphore_full`，不排队 |
 | LLM 返回 skip token（无论 `llm_skip_enabled`） | `reason=skipped_by_llm` |
 | LLM 返回空串 | `reason=empty_reply` |
@@ -84,7 +90,8 @@ go test -race ./...
 | 历史块头按会话类型 | 群聊 `[群聊记录]`、私聊 `[私聊记录]` |
 | 历史裁剪 | 超 `context_max_messages` 或 `llm_history_max_chars`（rune）从最旧丢弃，保留最新一条 |
 | 清洗管线 8 步（见 [`persona.md`](persona.md) §8.7） | 每条输入→输出样例一致 |
-| 在途写穿透未完成时调用 `Stop`（`Set` 阻塞到 gate 关闭） | `Stop` 先拒绝新写入并等其落库、再取消插件级 ctx：写入不被取消，`Stop` 在其结束后才返回（持久化后端不丢最后一次覆盖/策略） |
+| 在途写穿透未完成时调用 `Stop`（`Set` 阻塞到 gate 关闭） | `Stop` 先拒绝新写入并等队列排空、再取消插件级 ctx：写入不被取消，`Stop` 在其结束后才返回（持久化后端不丢最后一次覆盖/策略） |
+| 连续两次覆盖/策略变更（第一次 `Set` 阻塞） | 第二次 `Set` 在第一次完成前不启动；最终落库值为后提交的新状态，内存与存储一致 |
 | `/agent status` | 输出固定字段顺序一行 |
 | `/agent persona` | 输出 `persona: persona=<name> 来源=<override\|binding\|default> · 预设=[<按名称排序的全部预设>]` |
 | `/agent on`、`/agent off` | 切换开关，触发 `Storage.Set`，关闭时递增 `st.epoch` |
@@ -99,7 +106,7 @@ go test -race ./...
 | 多模态开关开启（`llm_vision_enabled=true`） | 图片由插件下载后内联为 `data:<mime>;base64,<数据>`，并在该条历史原本的消息位置产出 `{"type":"image_url","image_url":{"url":"data:..."}}` 块（前一块的文本到此截断）；原始 URL 不出现在请求体中；每条消息最多 1 张（取首个带 URL 的图片段）、总数受 `llm_vision_max_images` 限制（按时间序取最后 N 张）、被文本裁剪丢掉的条目里的图片不发 |
 | 图片下载失败路径 | 非 2xx、非 `image/*`、格式不在白名单、超过 `llm_vision_max_image_bytes`、连接失败的图各自被丢弃（`reason` 分别 `status`/`not_image`/`format`/`too_large`/`fetch_error`），其余图片与文本照常发送，不回落到传 URL |
 | 图片格式白名单（`llm_vision_allowed_formats=["png"]`，混合 png/jpeg） | 仅 png 进请求体；jpeg 被丢弃且 `reason=format`；未配置时不丢弃任何已识别格式 |
-| 图片地址限制 | 回环/私网/链路本地/未指定/组播目标（含 DNS 解析结果）被拒；拨号时才校验（重定向同样受限）；`data:`/非 http(s) scheme 直接丢弃 |
+| 图片地址限制 | 回环/私网/链路本地/未指定/组播目标（含 DNS 解析结果）被拒；CGNAT（含 `100.100.100.200`）、IETF/文档/benchmark/保留段、NAT64/6to4/Teredo 同样被拒；拨号时才校验（重定向同样受限）；`data:`/非 http(s) scheme 直接丢弃；宿主自定义 `DialTLS`/`DialTLSContext` 被清空 |
 | `llm_vision_max_images` / `llm_vision_max_image_bytes` 校验 | `-1` → `persona: 配置错误 llm_vision_max_images=-1: 必须 >= 0`；`0` → `persona: 配置错误 llm_vision_max_image_bytes=0: 必须 >= 1`；默认 `4` / `4194304`，`llm_vision_enabled` 默认 `false`；`llm_vision_max_images=0` 时不附加图片块；llm_vision_allowed_formats 无额外校验（缺省/空 = 不过滤） |
 | `debug_prompts=true` 日志 | 请求日志中 data URL 为 `data:image/png;base64,<N bytes>`，不含完整 base64；响应日志不变 |
 | `llm.go` 响应含 `tool_calls`（`content` 为 null / 缺失 / 字符串） | 返回 `ToolCalls`，`Content` 为空串或原文本；无 `tool_calls` 且 `content` 为 null 仍是错误 |
@@ -210,5 +217,5 @@ PY
 
 - **停止后不发送**：用假 `BotAPI` 计数，断言 `Stop` 之后不再有 `Send`。
 - **及时返回**：在存在待生成协程时调用 `Stop`，断言在 15s 内返回（`wg.Wait` 配合插件级 ctx cancel）。
-- **无定时器泄漏**：断言 `Stop` 停掉了全部 `time.AfterFunc` 布防的定时器（跟踪每个 `channelState.timer` 并在 `Stop` 时 `Stop()`）。
+- **无定时器泄漏**：断言 `Stop` 失效全部批处理（`timer` 停止、`timerSeq++`、`awaiting` 清零），且已触发的旧回调不会重新布防或新增 `p.wg` 任务。
 - **幂等**：重复调用 `Stop` 安全无 panic。

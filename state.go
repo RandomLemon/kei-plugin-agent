@@ -49,15 +49,21 @@ type channelState struct {
 	history       []Turn
 	replyTimes    []time.Time
 	lastReplyAt   time.Time
+	lastUsed      time.Time // 最近一次入站使用时间，供 LRU 淘汰
 	awaiting      bool
 	firstAt       time.Time
 	lastMsgAt     time.Time
 	timer         *time.Timer
+	timerSeq      uint64 // 定时器代次：旧回调发现代次不匹配时不得改状态
 	inflight      bool
 	epoch         uint64
 	disabled      bool
 	persona       string
 	loaded        bool
+	handling      int  // 正在 Handler/补判临界区内处理，LRU 不得淘汰
+	dirtyPersona  bool // 懒加载期间是否被 /agent persona|reset 覆盖
+	dirtyDisabled bool // 懒加载期间是否被 /agent on|off|reset 覆盖
+
 	pending       *pendingInbound // 懒加载完成前暂存的待决入站消息（有界单槽）
 	lastSenderID  string
 	lastAddressed bool
@@ -156,13 +162,36 @@ func (st *channelState) lastOwnTexts(n int) []string {
 	return out
 }
 
-// stopTimer 停止并清空定时器。
-func (st *channelState) stopTimer() {
+// touch 记录一次入站使用，供 LRU 按最近使用时间淘汰。
+func (st *channelState) touch(now time.Time) {
 	st.mu.Lock()
+	st.lastUsed = now
+	st.mu.Unlock()
+}
+
+// endHandle 结束 Handler/补判临界区标记。
+func (st *channelState) endHandle() {
+	st.mu.Lock()
+	st.handling--
+	st.mu.Unlock()
+}
+
+// invalidateBatchLocked 取消已布防的批处理，并让旧定时器回调因代次不匹配而失效。
+// 调用方必须持有 st.mu。
+func (st *channelState) invalidateBatchLocked() {
 	if st.timer != nil {
 		st.timer.Stop()
 		st.timer = nil
 	}
+	st.timerSeq++
+	st.awaiting = false
+	st.firstAt = time.Time{}
+}
+
+// stopBatch 取消批处理（Stop 时使用）。
+func (st *channelState) stopBatch() {
+	st.mu.Lock()
+	st.invalidateBatchLocked()
 	st.mu.Unlock()
 }
 
@@ -173,15 +202,12 @@ func (st *channelState) reset() {
 	st.history = st.history[:0]
 	st.replyTimes = nil
 	st.lastReplyAt = time.Time{}
-	st.awaiting = false
-	st.firstAt = time.Time{}
-	if st.timer != nil {
-		st.timer.Stop()
-		st.timer = nil
-	}
+	st.invalidateBatchLocked()
 	st.disabled = false
 	st.persona = ""
 	st.pending = nil
+	st.dirtyPersona = true
+	st.dirtyDisabled = true
 	st.epoch++
 	st.replies, st.skips, st.llmErrors, st.dropped = 0, 0, 0, 0
 }
@@ -210,9 +236,8 @@ func (st *channelState) isLoaded() bool {
 // 单槽有界：加载完成前到达的多条消息只保留最新一条——更早的已写入 history，
 // 仍会随本轮生成交给 LLM，只有真正的最新一条需要补判。
 type pendingInbound struct {
-	ev    *bot.Event
-	text  string
-	epoch uint64
+	ev   *bot.Event
+	text string
 }
 
 // deferOrLoaded 原子地处理懒加载状态：未加载则把本条入站消息存入单槽并返回 false，
@@ -224,7 +249,7 @@ func (st *channelState) deferOrLoaded(ev *bot.Event, text string) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if !st.loaded {
-		st.pending = &pendingInbound{ev: ev, text: text, epoch: st.epoch}
+		st.pending = &pendingInbound{ev: ev, text: text}
 		return false
 	}
 	return true
@@ -248,17 +273,37 @@ func channelKey(ev *bot.Event) (key, platform, botID, channelID string) {
 
 // stateFor 返回（必要时创建）会话状态；首次创建时异步触发 Storage 懒加载。
 func (p *Plugin) stateFor(ev *bot.Event) *channelState {
+	return p.stateForInternal(ev, false)
+}
+
+// acquireState 同 stateFor，并递增 handling；调用方必须 defer st.endHandle()。
+func (p *Plugin) acquireState(ev *bot.Event) *channelState {
+	return p.stateForInternal(ev, true)
+}
+
+func (p *Plugin) stateForInternal(ev *bot.Event, handling bool) *channelState {
 	key, platform, botID, channelID := channelKey(ev)
 
 	p.mu.RLock()
 	st := p.channels[key]
-	p.mu.RUnlock()
 	if st != nil {
+		if handling {
+			st.mu.Lock()
+			st.handling++
+			st.mu.Unlock()
+		}
+		p.mu.RUnlock()
 		return st
 	}
+	p.mu.RUnlock()
 
 	p.mu.Lock()
 	if st = p.channels[key]; st != nil {
+		if handling {
+			st.mu.Lock()
+			st.handling++
+			st.mu.Unlock()
+		}
 		p.mu.Unlock()
 		return st
 	}
@@ -274,16 +319,26 @@ func (p *Plugin) stateFor(ev *bot.Event) *channelState {
 			channelName = ev.Sender.Name // 私聊的「会话显示名」= 对端显示名
 		}
 	}
+	now := p.now()
 	st = &channelState{
 		key: key, platform: platform, botID: botID, channelID: channelID,
 		channelName: channelName, kind: kind, peerUserID: peerUserID,
-		histMax: p.cfg.contextMaxMessages,
+		histMax: p.cfg.contextMaxMessages, lastUsed: now,
+	}
+	if handling {
+		st.handling = 1
 	}
 	p.channels[key] = st
-	p.evictLocked()
+	p.evictLocked(key) // 不淘汰本次刚创建的会话
 	p.mu.Unlock()
 
-	p.wg.Add(1)
+	if p.ctx == nil {
+		p.finishLoad(st, "", false, false)
+		return st
+	}
+	if !p.startTask() {
+		return st
+	}
 	go func() {
 		defer p.wg.Done()
 		p.restoreState(st)
@@ -291,8 +346,9 @@ func (p *Plugin) stateFor(ev *bot.Event) *channelState {
 	return st
 }
 
-// evictLocked 在会话数超限时按最近使用时间淘汰非忙状态。调用方需持有写锁。
-func (p *Plugin) evictLocked() {
+// evictLocked 在会话数超限时按最近使用时间淘汰非忙状态；keep 永不淘汰。
+// 调用方需持有写锁。
+func (p *Plugin) evictLocked(keep string) {
 	max := p.cfg.contextMaxChannels
 	if max <= 0 || len(p.channels) <= max {
 		return
@@ -303,10 +359,16 @@ func (p *Plugin) evictLocked() {
 	}
 	cands := make([]cand, 0, len(p.channels))
 	for k, st := range p.channels {
+		if k == keep {
+			continue
+		}
 		st.mu.Lock()
 		// 有暂存待判消息的状态视同忙：淘汰它等于丢掉这条消息。
-		busy := st.inflight || st.awaiting || st.pending != nil
-		at := st.lastMsgAt
+		busy := st.inflight || st.awaiting || st.pending != nil || st.handling > 0
+		at := st.lastUsed
+		if st.lastMsgAt.After(at) {
+			at = st.lastMsgAt
+		}
 		if st.lastReplyAt.After(at) {
 			at = st.lastReplyAt
 		}
@@ -374,22 +436,64 @@ func (p *Plugin) restoreState(st *channelState) {
 // 补判同样禁止网络调用，只做判定与布防（见 decide）。
 func (p *Plugin) finishLoad(st *channelState, persona string, disabled, restored bool) {
 	st.mu.Lock()
+	dirty := st.dirtyPersona || st.dirtyDisabled
 	if restored {
-		st.persona = persona
-		st.disabled = disabled
+		if !st.dirtyPersona {
+			st.persona = persona
+		}
+		if !st.dirtyDisabled {
+			st.disabled = disabled
+		}
 	}
 	st.loaded = true
+	st.dirtyPersona = false
+	st.dirtyDisabled = false
 	pend := st.pending
 	st.pending = nil
-	if pend != nil && pend.epoch != st.epoch {
-		pend = nil // 期间被 /agent reset 代次作废，暂存消息随之丢弃
+	if pend != nil {
+		st.handling++ // 补判期间不得被 LRU 淘汰
 	}
+	kind := st.kind
+	channelID := st.channelID
+	peerUserID := st.peerUserID
 	st.mu.Unlock()
+	if pend != nil {
+		defer st.endHandle()
+	}
 
+	// 加载期间有管理命令时，此刻的内存值才同时包含旧快照与命令变更。
+	if dirty {
+		p.saveOverride(st)
+	}
 	if pend == nil || p.ctx == nil || p.ctx.Err() != nil {
 		return
 	}
+	sender := ""
+	if pend.ev.Sender != nil {
+		sender = pend.ev.Sender.ID
+	}
+	// 加载期间管理员可能改了名单策略；补判前按当前策略复核，避免拒绝后仍回复。
+	if kind == bot.MessagePrivate {
+		if !p.policyAllowsPrivate(peerUserID) {
+			_ = p.skipLog(st.key, "not_allowed", sender)
+			return
+		}
+	} else if !p.policyAllowsGroup(channelID) {
+		_ = p.skipLog(st.key, "not_allowed", sender)
+		return
+	}
 	_ = p.decide(st, st.key, pend.ev, pend.text)
+}
+
+// saveOverrideIfLoaded 在懒加载完成后立即写穿透；加载中只标记 dirty，
+// 由 finishLoad 合并旧快照后统一落库，避免用不完整的内存值覆盖存储。
+func (p *Plugin) saveOverrideIfLoaded(st *channelState) {
+	st.mu.Lock()
+	loaded := st.loaded
+	st.mu.Unlock()
+	if loaded {
+		p.saveOverride(st)
+	}
 }
 
 // saveOverride 写穿透持久化会话覆盖（异步、带超时、失败只 warn）。

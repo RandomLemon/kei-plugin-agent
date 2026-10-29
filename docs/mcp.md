@@ -341,7 +341,7 @@ reload 的 Handler 只做参数校验、记录回复目标、登记任务并立�
 6. `toolsFor` 复制其选择结果，维持「全部工具 / 无工具 / 名单交集」语义。保持 `completeWithTools`、`runTool`、`callTool`、`llm.go` 和 `generate` 的调用逻辑；无需增加 MCP 分支、第二个生成循环或新的 LLM 请求格式。
 
    随入口改动同步 `plugin.go`、`tools.go`、`llm.go` 注释中的工具文档路径，统一指向 `mcp.md`；RAG 源码里的旧引用随文件删除。
-7. Stop 保持现有「关闭准入 → 等写穿透 → cancel → 停定时器 → 等生成」顺序，在最后用 Stop 阶段 ctx 加 `mcp_timeout` 调客户端 `close`。没有 session 时不发 DELETE；清理请求不使用已经取消的 `p.ctx`。成功结束后清空 session，使再次 Stop 不重复删除；405 的处理沿用 §14.7。
+7. Stop 保持现有「关闭准入 → 排空写队列 → cancel → 失效批处理 → 等生成」顺序，在最后用 Stop 阶段 ctx 加 `mcp_timeout` 调客户端 `close`。没有 session 时不发 DELETE；清理请求不使用已经取消的 `p.ctx`。成功结束后清空 session，使再次 Stop 不重复删除；405 的处理沿用 §14.7。
 8. 随实现同步下面的三组测试。复用 [`helpers_test.go`](../helpers_test.go) 的 `newTestEnv` / `fakeBotAPI` 与 [`tools_test.go`](../tools_test.go) 的 completer 桩；在 `mcp_test.go` 增加一个可设置目录、记录调用的 `httptest.Server` 桩即可。只加实际需要的响应模式和阻塞控制，不搭通用脚本引擎、测试框架、专用开发命令或生产管理端点。
 
    既有通用测试的 `newToolEnv` 去掉 RAG 配置，桩名称改用测试内定义的 `mcp__search` 等名称；工具仍在启动后直接注入 `p.tools`。人格过滤/调用数测试需要的名单在启动后、投递任何事件前设置到测试配置的 Persona 上，不为这些桩用例启用 MCP 或建立 HTTP 服务。配置解析的名单规则由 `config_test.go` 单独覆盖。

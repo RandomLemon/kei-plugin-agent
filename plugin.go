@@ -37,14 +37,18 @@ type Plugin struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// writeMu 保护 closing/mcpRefreshing；写穿透、刷新与 Stop 用它串行化任务准入。
+	// writeMu 保护 closing/mcpRefreshing 与写队列；写穿透、刷新、任务准入与
+	// Stop 用它串行化关闭判定。
 	writeMu sync.Mutex
-	// closing 为真表示 Stop 已开始，此后不再接受新的写穿透或刷新。
+	// closing 为真表示 Stop 已开始，此后不再接受新的写穿透、任务或刷新。
 	closing       bool
 	mcpRefreshing bool
-	// writeWG 跟踪在途的写穿透协程：Stop 先等它们结束再取消 p.ctx，
-	// 否则派生自 p.ctx 的写入会被当场取消（持久化后端上会丢数据）。
-	writeWG sync.WaitGroup
+	// writeCond/writeQueue/writerDone 构成单写协程：所有 Storage.Set 按提交顺序
+	// 串行落库，避免同一键的旧快照后完成而覆盖新值。Stop 先关闭准入并等待
+	// writerDone，再取消 p.ctx。
+	writeCond  *sync.Cond
+	writeQueue []writeOp
+	writerDone chan struct{}
 
 	mu       sync.RWMutex
 	channels map[string]*channelState
@@ -148,46 +152,92 @@ func (p *Plugin) Start(ctx context.Context) error {
 		}
 		p.replaceMCPTools(tools)
 	}
+	p.writeMu.Lock()
+	p.writeCond = sync.NewCond(&p.writeMu)
+	p.writerDone = make(chan struct{})
+	p.writeMu.Unlock()
+	go p.writeLoop()
 	return nil
 }
 
-// persist 异步执行一次写穿透：带 storageTimeout 超时，失败只 warn。
-//
-// Stop 之后拒绝新写入；在途写入由 writeWG 跟踪，Stop 会先等它们结束再取消
-// p.ctx——顺序反了的话，派生自 p.ctx 的写入 ctx 会被当场取消，持久化后端
-// （sqlite/mysql）上最后一次覆盖或策略变更就丢了。
-func (p *Plugin) persist(op string, fn func(ctx context.Context) error, attrs ...any) {
-	if p.ctx == nil || p.store == nil {
-		return
-	}
+// writeOp 是一次写穿透任务；按提交顺序由单写协程执行。
+type writeOp struct {
+	message string
+	fn      func(ctx context.Context) error
+	attrs   []any
+}
+
+// startTask 在关闭准入锁内登记一个 p.wg 任务，避免 Stop 开始后再 Add。
+func (p *Plugin) startTask() bool {
 	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	if p.closing {
+		return false
+	}
+	p.wg.Add(1)
+	return true
+}
+
+// writeLoop 串行执行写穿透队列，直到 Stop 置 closing 且队列排空。
+func (p *Plugin) writeLoop() {
+	defer close(p.writerDone)
+	for {
+		p.writeMu.Lock()
+		for len(p.writeQueue) == 0 && !p.closing {
+			p.writeCond.Wait()
+		}
+		if len(p.writeQueue) == 0 {
+			p.writeMu.Unlock()
+			return
+		}
+		op := p.writeQueue[0]
+		p.writeQueue[0] = writeOp{}
+		p.writeQueue = p.writeQueue[1:]
+		p.writeMu.Unlock()
+
+		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
+		err := op.fn(ctx)
+		cancel()
+		if err != nil {
+			p.log.Warn(op.message, append(op.attrs, "err", err)...)
+		}
+	}
+}
+
+// persist 把一次写穿透加入队列：按提交顺序串行执行，单次带 storageTimeout 超时，
+// 失败只 warn。Stop 之后拒绝新写入；Stop 先关闭准入并等待 writerDone（队列排空），
+// 再取消 p.ctx，避免最后一次写入被当场取消。
+func (p *Plugin) persist(op string, fn func(ctx context.Context) error, attrs ...any) {
+	p.writeMu.Lock()
+	if p.closing || p.writeCond == nil || p.ctx == nil || p.store == nil {
 		p.writeMu.Unlock()
 		return
 	}
-	p.writeWG.Add(1)
+	p.writeQueue = append(p.writeQueue, writeOp{
+		message: op,
+		fn:      fn,
+		attrs:   append([]any(nil), attrs...),
+	})
+	p.writeCond.Signal()
 	p.writeMu.Unlock()
-
-	go func() {
-		defer p.writeWG.Done()
-		ctx, cancel := context.WithTimeout(p.ctx, storageTimeout)
-		defer cancel()
-		if err := fn(ctx); err != nil {
-			p.log.Warn(op, append(attrs, "err", err)...)
-		}
-	}()
 }
 
-// Stop 标记关闭、等待在途写穿透结束，再取消插件级 ctx、停止全部定时器并
-// 等待后台协程退出；幂等。
+// Stop 标记关闭、排空写队列，再取消插件级 ctx、停掉全部批处理并等待后台
+// 协程退出；幂等。
 func (p *Plugin) Stop(ctx context.Context) error {
-	// 先拒绝新写入并等在途写入落库，再取消 p.ctx：写穿透的 ctx 派生自 p.ctx，
-	// 先取消会让持久化后端上的最后一次写入被丢弃（见 persist）。每次写入自带
-	// storageTimeout，故这里的等待有界。
+	// 先拒绝新写入并让单写协程把队列排空，再取消 p.ctx：写穿透的 ctx 派生自
+	// p.ctx，先取消会让持久化后端上的最后一次写入被丢弃（见 persist）。每次
+	// 写入自带 storageTimeout，故这里的等待有界。
 	p.writeMu.Lock()
 	p.closing = true
+	writerDone := p.writerDone
+	if p.writeCond != nil {
+		p.writeCond.Broadcast()
+	}
 	p.writeMu.Unlock()
-	p.writeWG.Wait()
+	if writerDone != nil {
+		<-writerDone
+	}
 
 	if p.cancel != nil {
 		p.cancel()
@@ -199,7 +249,7 @@ func (p *Plugin) Stop(ctx context.Context) error {
 	}
 	p.mu.RUnlock()
 	for _, st := range states {
-		st.stopTimer()
+		st.stopBatch()
 	}
 	p.wg.Wait()
 	if p.mcp != nil {

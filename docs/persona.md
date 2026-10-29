@@ -90,10 +90,10 @@ reg.OnCommand("agent", p.handleCommand,
 | --- | --- |
 | `status` | 输出固定字段顺序的一行（见下） |
 | `persona` | 打印当前预设名 + 来源 + 全部预设列表（按名称排序） |
-| `persona <name>` | 校验存在 → 写运行时覆盖 → 持久化 → `epoch++` |
-| `on` | 置 `disabled=false`，持久化 |
-| `off` | 置 `disabled=true`，停止定时器，`epoch++`，持久化 |
-| `reset` | 清历史/覆盖/计数器，置 `on`，`epoch++`，持久化 |
+| `persona <name>` | 校验存在 → 写运行时覆盖（标记 `dirty`）→ 失效当前批处理 → `epoch++` → 持久化 |
+| `on` | 置 `disabled=false`（标记 `dirty`），持久化；不取消已布防的批处理 |
+| `off` | 置 `disabled=true`（标记 `dirty`）→ 失效当前批处理 → `epoch++` → 持久化 |
+| `reset` | 清历史/覆盖/计数器，置 `on`，失效批处理，`epoch++`，持久化 |
 | `policy` | 打印群聊/私聊名单模式与名单条数 |
 | `policy <group\|private> <mode>` | 设置该侧模式（`off`/`open`/`whitelist`/`blacklist`）→ 写穿透持久化 |
 | `list` | 打印群聊/私聊名单 |

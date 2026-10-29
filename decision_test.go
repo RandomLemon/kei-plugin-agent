@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -610,7 +611,7 @@ func TestGenerateStale(t *testing.T) {
 	st.epoch = 9
 	st.mu.Unlock()
 	env.p.wg.Add(1)
-	env.p.generate(st, 1, nil)
+	env.p.generate(st, 1, nil, generationRound{kind: "random", chatKind: bot.MessageGroup})
 	if !env.cap.has("stale") {
 		t.Fatal("want stale")
 	}
@@ -1114,4 +1115,327 @@ func TestVisionDecisionRequestShape(t *testing.T) {
 			t.Error("应记录 reason=format 的丢弃日志")
 		}
 	})
+}
+
+// TestLRUEvictsOldestNotNewest 回归：新会话不能被自己触发的 LRU 立刻淘汰。
+func TestLRUEvictsOldestNotNewest(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		c["context_max_channels"] = 1
+	})
+	old := env.p.stateFor(groupEvent("g1", "u1", "张三", "hi"))
+	old.mu.Lock()
+	old.lastUsed = env.p.now().Add(-time.Hour)
+	old.mu.Unlock()
+
+	fresh := env.p.stateFor(groupEvent("g2", "u2", "李四", "hi"))
+	env.p.mu.RLock()
+	_, keptOld := env.p.channels["mock:bot1:g1"]
+	_, keptNew := env.p.channels["mock:bot1:g2"]
+	env.p.mu.RUnlock()
+	if !keptNew || fresh == nil {
+		t.Fatal("新会话被 LRU 淘汰")
+	}
+	if keptOld {
+		t.Fatal("更久未使用的旧会话未被淘汰")
+	}
+}
+
+// TestStaleBatchDoesNotStick 回归：/agent persona 使旧定时器失效后，随机路径必须恢复。
+func TestStaleBatchDoesNotStick(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		c["batch_window"] = "50ms"
+		c["batch_max_window"] = "1h"
+		c["random_probability"] = 0.0
+		c["random_min_participants"] = 1
+		c["random_cooldown"] = "0s"
+		c["mention_min_interval"] = "0s"
+	})
+	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+	env.p.cfg.randomProbability = 1
+	env.setRand(0)
+
+	_ = env.deliver(groupEvent("g1", "u1", "张三", "大家好"))
+	st := env.p.stateFor(groupEvent("g1", "u1", "张三", "大家好"))
+	st.mu.Lock()
+	awaiting := st.awaiting
+	st.mu.Unlock()
+	if !awaiting {
+		t.Fatal("应已布防")
+	}
+
+	_ = env.command("persona", "tsundere")
+	time.Sleep(100 * time.Millisecond) // 旧定时器若未被取消/失效，此时会留下 awaiting
+
+	st.mu.Lock()
+	awaiting = st.awaiting
+	st.mu.Unlock()
+	if awaiting {
+		t.Fatal("旧定时器失效后 awaiting 仍为 true")
+	}
+
+	// 缩短窗口，确认随机路径仍能正常生成。
+	env.p.cfg.batchWindow = time.Millisecond
+	env.p.cfg.batchMaxWindow = 5 * time.Millisecond
+	_ = env.deliver(groupEvent("g1", "u1", "张三", "继续聊"))
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("随机路径未恢复")
+	}
+}
+
+type blockingCompleter struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (c *blockingCompleter) Complete(ctx context.Context, _ completionRequest) (completionResult, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	c.once.Do(func() { close(c.entered) })
+	select {
+	case <-c.release:
+		return completionResult{Content: "回复"}, nil
+	case <-ctx.Done():
+		return completionResult{}, ctx.Err()
+	}
+}
+
+func (c *blockingCompleter) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestAddressedRetriesWhileInflight 回归：生成在途时到达的寻址消息必须补一轮，
+// 且首轮不能因后续 schedule 改写 state 而 @ 错人。
+func TestAddressedRetriesWhileInflight(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		c["batch_window"] = "10ms"
+		c["batch_max_window"] = "10ms"
+		c["random_enabled"] = false
+		c["mention_min_interval"] = "0s"
+		c["mention_reply_probability"] = 1.0
+		c["reply_mention_sender"] = true
+		c["reply_dedupe"] = false
+	})
+	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+
+	bc := &blockingCompleter{entered: make(chan struct{}), release: make(chan struct{})}
+	env.p.completer = bc
+
+	_ = env.deliver(atEvent("g1", "u1", "张三", "第一句"))
+	select {
+	case <-bc.entered:
+	case <-time.After(time.Second):
+		t.Fatal("首轮未进入 LLM")
+	}
+
+	_ = env.deliver(atEvent("g1", "u2", "李四", "第二句"))
+	// 第二个窗口结束时会遇到 inflight，旧实现直接丢弃；新实现保留并重试。
+	time.Sleep(250 * time.Millisecond)
+	if got := bc.callCount(); got != 1 {
+		t.Fatalf("首轮未完成时不应启动第二轮, calls=%d", got)
+	}
+	if got := env.fake.count(); got != 0 {
+		t.Fatalf("release 前不应发送, count=%d", got)
+	}
+
+	close(bc.release)
+	if !env.waitSends(2, 3*time.Second) {
+		t.Fatalf("寻址消息在 inflight 后被丢弃, sends=%d", env.fake.count())
+	}
+	first, second := env.fake.at(0).Msg, env.fake.at(1).Msg
+	if len(first.Segments) < 2 || first.Segments[0].Type != bot.SegAt ||
+		first.Segments[0].Data[bot.KeyUserID] != "u1" {
+		t.Fatalf("首轮应 @ u1: %+v", first.Segments)
+	}
+	if len(second.Segments) < 2 || second.Segments[0].Type != bot.SegAt ||
+		second.Segments[0].Data[bot.KeyUserID] != "u2" {
+		t.Fatalf("第二轮应 @ u2: %+v", second.Segments)
+	}
+}
+
+// TestStopInvalidatesBatch 回归：Stop 后不得再布防定时器，旧回调也不能改状态。
+func TestStopInvalidatesBatch(t *testing.T) {
+	env := newTestEnv(t, nil, nil)
+	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+	_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+	st := env.p.stateFor(groupEvent("g1", "u1", "张三", "在吗"))
+	st.mu.Lock()
+	epoch, seq, awaiting := st.epoch, st.timerSeq, st.awaiting
+	st.mu.Unlock()
+	if !awaiting {
+		t.Fatal("应已布防")
+	}
+
+	if err := env.p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	st.mu.Lock()
+	timer, awaiting := st.timer, st.awaiting
+	st.mu.Unlock()
+	if timer != nil || awaiting {
+		t.Fatalf("Stop 未清理批处理: timer=%v awaiting=%v", timer != nil, awaiting)
+	}
+
+	env.p.onBatch(st, epoch, seq) // 模拟 Stop 前已触发的旧回调
+	st.mu.Lock()
+	timer = st.timer
+	st.mu.Unlock()
+	if timer != nil {
+		t.Fatal("Stop 后 onBatch 重新布防了定时器")
+	}
+}
+
+// TestFinishLoadKeepsCommandOverride 回归：懒加载快照不得覆盖加载期间的管理命令。
+func TestFinishLoadKeepsCommandOverride(t *testing.T) {
+	store := &blockingOverrideStorage{
+		fakeStorage: newFakeStorage(),
+		gate:        make(chan struct{}),
+		snapshot:    []byte(`{"persona":"","disabled":false}`),
+	}
+	env := newTestEnvWith(t, nil, func(c map[string]any) {
+		c["random_enabled"] = false
+	}, store, nil)
+
+	_ = env.deliver(groupEvent("g1", "u1", "张三", "hi"))
+	_ = env.command("off")
+	st := env.p.stateFor(groupEvent("g1", "u1", "张三", "hi"))
+	close(store.gate)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !st.isLoaded() {
+		time.Sleep(time.Millisecond)
+	}
+	if !st.isLoaded() {
+		t.Fatal("懒加载超时")
+	}
+	if !st.isDisabled() {
+		t.Fatal("旧快照覆盖了 /agent off")
+	}
+	if !env.waitReason("channel_off", time.Second) {
+		t.Fatal("暂存消息应按关闭状态补判")
+	}
+	if env.fake.count() != 0 {
+		t.Fatal("关闭的会话不应发送")
+	}
+}
+
+// TestFinishLoadRechecksPolicy 回归：加载期间修改名单策略后，补判必须重新检查。
+func TestFinishLoadRechecksPolicy(t *testing.T) {
+	store := &blockingOverrideStorage{
+		fakeStorage: newFakeStorage(),
+		gate:        make(chan struct{}),
+		snapshot:    []byte(`{"persona":"","disabled":false}`),
+	}
+	env := newTestEnvWith(t, nil, func(c map[string]any) {
+		c["batch_window"] = "1ms"
+		c["batch_max_window"] = "5ms"
+		c["mention_min_interval"] = "0s"
+		c["mention_reply_probability"] = 1.0
+	}, store, nil)
+
+	_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+	_ = env.command("policy", "group", "off")
+	close(store.gate)
+	if !env.waitReason("not_allowed", time.Second) {
+		t.Fatal("补判未重新检查名单策略")
+	}
+	if env.fake.count() != 0 {
+		t.Fatal("策略关闭后不应发送")
+	}
+}
+
+// TestPendingSurvivesPersonaChange 回归：加载期间换人格不应吞掉首条消息。
+func TestPendingSurvivesPersonaChange(t *testing.T) {
+	store := &blockingOverrideStorage{
+		fakeStorage: newFakeStorage(),
+		gate:        make(chan struct{}),
+		snapshot:    []byte(`{"persona":"","disabled":false}`),
+	}
+	env := newTestEnvWith(t, nil, func(c map[string]any) {
+		c["batch_window"] = "1ms"
+		c["batch_max_window"] = "5ms"
+		c["mention_min_interval"] = "0s"
+		c["mention_reply_probability"] = 1.0
+	}, store, nil)
+
+	_ = env.deliver(atEvent("g1", "u1", "张三", "在吗"))
+	_ = env.command("persona", "tsundere")
+	close(store.gate)
+	if !env.waitSends(1, 2*time.Second) {
+		t.Fatal("换人格后首条消息被吞掉")
+	}
+	st := env.p.stateFor(groupEvent("g1", "u1", "张三", "在吗"))
+	if name, src := env.p.resolvePersona(st); name != "tsundere" || src != "override" {
+		t.Fatalf("人格 = %s/%s, want tsundere/override", name, src)
+	}
+}
+
+// TestLoadMergesCommandFields 回归：加载期间只改开关时，仍要恢复已持久化的人格；
+// 且合并后的覆盖必须落库，不能用未加载完整的内存值覆盖存储。
+func TestLoadMergesCommandFields(t *testing.T) {
+	store := &blockingOverrideStorage{
+		fakeStorage: newFakeStorage(),
+		gate:        make(chan struct{}),
+		snapshot:    []byte(`{"persona":"tsundere","disabled":true}`),
+	}
+	env := newTestEnvWith(t, nil, func(c map[string]any) {
+		c["random_enabled"] = false
+	}, store, nil)
+
+	_ = env.deliver(groupEvent("g1", "u1", "张三", "hi"))
+	_ = env.command("on")
+	st := env.p.stateFor(groupEvent("g1", "u1", "张三", "hi"))
+	close(store.gate)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !st.isLoaded() {
+		time.Sleep(time.Millisecond)
+	}
+	if !st.isLoaded() {
+		t.Fatal("懒加载超时")
+	}
+	st.mu.Lock()
+	persona, disabled := st.persona, st.disabled
+	st.mu.Unlock()
+	if persona != "tsundere" {
+		t.Fatalf("persona = %q, want tsundere", persona)
+	}
+	if disabled {
+		t.Fatal("/agent on 被旧快照覆盖")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	var raw string
+	for time.Now().Before(deadline) {
+		if v, ok := store.value(overrideKey("mock:bot1:g1")); ok &&
+			strings.Contains(v, `"persona":"tsundere"`) && strings.Contains(v, `"disabled":false`) {
+			raw = v
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(raw, `"persona":"tsundere"`) || !strings.Contains(raw, `"disabled":false`) {
+		t.Fatalf("合并后的覆盖未落库: %q", raw)
+	}
+}
+
+// TestLRUKeepsHandlingSession 回归：正在 Handler/补判中的会话不能被 LRU 淘汰。
+func TestLRUKeepsHandlingSession(t *testing.T) {
+	env := newTestEnv(t, nil, func(c map[string]any) {
+		c["context_max_channels"] = 1
+	})
+	st := env.p.acquireState(groupEvent("g1", "u1", "张三", "hi"))
+	defer st.endHandle()
+	st.touch(env.p.now().Add(-time.Hour)) // 即使看起来最旧，handling 也应保护
+
+	_ = env.p.stateFor(groupEvent("g2", "u2", "李四", "hi"))
+	env.p.mu.RLock()
+	_, kept := env.p.channels["mock:bot1:g1"]
+	env.p.mu.RUnlock()
+	if !kept {
+		t.Fatal("正在处理的会话被 LRU 淘汰")
+	}
 }

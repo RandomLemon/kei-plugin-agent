@@ -47,7 +47,9 @@ func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) err
 		return p.skipLog(key, "not_allowed", ev.Sender.ID)
 	}
 	text, parts := renderMessage(ev.Message)
-	st := p.stateFor(ev)
+	st := p.acquireState(ev)
+	st.touch(p.now())
+	defer st.endHandle()
 	if ev.Command == nil {
 		st.appendHistory(p.userTurn(ev, text, parts))
 	}
@@ -241,9 +243,26 @@ func parseHM(s string) (int, bool) {
 	return h*60 + m, true
 }
 
+// inflightRetryDelay 是批处理窗口结束时已有生成在途时的重试间隔。
+// 保留本轮批处理而不是丢弃，确保寻址消息不会被静默吞掉。
+const inflightRetryDelay = 100 * time.Millisecond
+
+// generationRound 是发起生成时捕获的本轮元数据。
+// 生成期间不允许再从 channelState 读取这些字段，否则新到达的消息会污染在途轮次。
+type generationRound struct {
+	kind      string // "addressed" | "random"
+	senderID  string
+	addressed bool
+	chatKind  bot.MessageKind
+}
+
 // schedule 布防批处理窗口。
 func (p *Plugin) schedule(st *channelState, kind string, ev *bot.Event) error {
 	st.mu.Lock()
+	if p.ctx == nil || p.ctx.Err() != nil { // Stop 已开始，不再布防新定时器
+		st.mu.Unlock()
+		return nil
+	}
 	now := p.now()
 	st.awaiting = true
 	st.pendingKind = kind
@@ -267,7 +286,9 @@ func (p *Plugin) schedule(st *channelState, kind string, ev *bot.Event) error {
 	}
 	epoch := st.epoch
 	key := st.key
-	st.timer = time.AfterFunc(delay, func() { p.onBatch(st, epoch) })
+	st.timerSeq++
+	seq := st.timerSeq
+	st.timer = time.AfterFunc(delay, func() { p.onBatch(st, epoch, seq) })
 	st.mu.Unlock()
 
 	p.log.Debug("persona 决策", "decision", "reply", "kind", kind, "channel", key)
@@ -275,9 +296,19 @@ func (p *Plugin) schedule(st *channelState, kind string, ev *bot.Event) error {
 }
 
 // onBatch 定时器回调：窗口未结束则重新布防，否则启动生成。
-func (p *Plugin) onBatch(st *channelState, epoch uint64) {
+func (p *Plugin) onBatch(st *channelState, epoch uint64, seq uint64) {
 	st.mu.Lock()
+	if st.timerSeq != seq { // 已被更新的 schedule/reset/off 取代
+		st.mu.Unlock()
+		return
+	}
+	if p.ctx == nil || p.ctx.Err() != nil {
+		st.invalidateBatchLocked()
+		st.mu.Unlock()
+		return
+	}
 	if st.epoch != epoch || !st.awaiting {
+		st.invalidateBatchLocked()
 		st.mu.Unlock()
 		return
 	}
@@ -290,26 +321,44 @@ func (p *Plugin) onBatch(st *channelState, epoch uint64) {
 		if delay < 0 {
 			delay = 0
 		}
-		st.timer = time.AfterFunc(delay, func() { p.onBatch(st, epoch) })
+		st.timerSeq++
+		next := st.timerSeq
+		st.timer = time.AfterFunc(delay, func() { p.onBatch(st, epoch, next) })
+		st.mu.Unlock()
+		return
+	}
+	if st.inflight {
+		// 不丢本轮：已有生成在途时短暂重试，完成后继续。
+		st.timerSeq++
+		next := st.timerSeq
+		st.timer = time.AfterFunc(inflightRetryDelay, func() { p.onBatch(st, epoch, next) })
 		st.mu.Unlock()
 		return
 	}
 	st.awaiting = false
 	st.firstAt = time.Time{}
-	if st.inflight {
-		st.mu.Unlock()
-		return
-	}
+	st.timer = nil
 	st.inflight = true
+	round := generationRound{
+		kind:      st.pendingKind,
+		senderID:  st.lastSenderID,
+		addressed: st.lastAddressed,
+		chatKind:  st.kind,
+	}
 	history := st.snapshotHistoryLocked(p.cfg.contextMaxMessages)
 	st.mu.Unlock()
 
-	p.wg.Add(1)
-	go p.generate(st, epoch, history)
+	if !p.startTask() {
+		st.mu.Lock()
+		st.inflight = false
+		st.mu.Unlock()
+		return
+	}
+	go p.generate(st, epoch, history, round)
 }
 
 // generate 在后台协程内完成 LLM 调用、清洗与发送。
-func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
+func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn, round generationRound) {
 	defer p.wg.Done()
 	defer func() {
 		st.mu.Lock()
@@ -319,7 +368,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 
 	if !p.sem.TryAcquire() {
 		p.bumpDropped(st)
-		_ = p.skipLog(st.key, "semaphore_full", st.senderID())
+		_ = p.skipLog(st.key, "semaphore_full", round.senderID)
 		return
 	}
 	defer p.sem.Release()
@@ -327,12 +376,12 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	st.mu.Lock()
 	if st.epoch != epoch {
 		st.mu.Unlock()
-		_ = p.skipLog(st.key, "stale", st.senderID())
+		_ = p.skipLog(st.key, "stale", round.senderID)
 		return
 	}
-	pendingKind := st.pendingKind
-	sender := st.lastSenderID
-	chatKind := st.kind
+	pendingKind := round.kind
+	sender := round.senderID
+	chatKind := round.chatKind
 	st.mu.Unlock()
 
 	if p.ctx == nil {
@@ -384,7 +433,7 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 	}
 	platform, botID, channelID := st.platform, st.botID, st.channelID
 	peer := st.peerUserID
-	mention := p.cfg.replyMentionSender && st.lastAddressed && chatKind == bot.MessageGroup
+	mention := p.cfg.replyMentionSender && round.addressed && chatKind == bot.MessageGroup
 	st.mu.Unlock()
 
 	segs := make([]bot.Segment, 0, 2)
@@ -427,12 +476,6 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn) {
 func (p *Plugin) skipLog(key, reason, sender string) error {
 	p.log.Debug("persona 决策", "decision", "skip", "reason", reason, "channel", key, "sender", sender)
 	return nil
-}
-
-func (st *channelState) senderID() string {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.lastSenderID
 }
 
 func (p *Plugin) bumpSkip(st *channelState) {

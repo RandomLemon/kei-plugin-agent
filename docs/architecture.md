@@ -104,15 +104,16 @@ reg.OnCommand("agent", p.handleCommand,
 2. 同步读取插件级名单策略覆盖（`loadPolicy`，`Storage.Get` 带 1s 超时，失败只 `Warn` 并保留配置默认值）。同步是为了避免「策略未就绪窗口」内误放行/误拒；这一步用**阶段 ctx**（受阶段 15s 预算约束）。
 3. 异步恢复 Storage 覆盖（每会话懒加载，见第 4 章）。
 4. 配置了 MCP 时，用阶段 ctx 与 `mcp_timeout` 共同限定首次初始化和完整目录加载；失败返回 error 阻止启动（[`mcp.md`](mcp.md) §14.7）。
-5. 启动完成，等待事件。
+5. 启动单写协程 `writeLoop`（按提交顺序串行执行写穿透队列，见 §4.6）。
+6. 启动完成，等待事件。
 
 **`Stop(ctx)`**
 
-1. 标记关闭（`closing`，此后不再接受新的写穿透或 MCP 刷新）并 `p.writeWG.Wait()`：**先**等在途写穿透落库，**再**取消插件级 ctx。写穿透的 ctx 派生自 `p.ctx`，顺序反了会让持久化后端（sqlite/mysql）上的最后一次覆盖/策略写入被当场取消丢弃（见 §4.6）。
+1. 标记关闭（`closing`，此后不再接受新的写穿透、后台任务或 MCP 刷新），广播写队列并等待 `writerDone`：**先**让已排队的写穿透按序落库，**再**取消插件级 ctx。写穿透的 ctx 派生自 `p.ctx`，顺序反了会让持久化后端（sqlite/mysql）上的最后一次覆盖/策略写入被当场取消丢弃（见 §4.6）。
 2. `p.cancel()`：取消插件级 ctx，终止全部派生工作。
-3. 停止全部 `channelState.timer`（每个 `time.Timer.Stop()`）。
+3. 失效全部批处理：对每个 `channelState` 停止 `timer`、递增 `timerSeq` 并清空 `awaiting`/`firstAt`，使已触发的旧回调无法再改状态或重新布防。
 4. `p.wg.Wait()`：等待全部生成与 MCP 刷新协程退出；有 MCP session 时，用 Stop 阶段 ctx 加超时发送 DELETE（[`mcp.md`](mcp.md) §14.7）。
-5. 幂等：重复调用安全。不需要额外 flush——每次变更都已触发写穿透，第 1 步只等在途的那一次（见第 4 章）。
+5. 幂等：重复调用安全。不需要额外 flush——每次变更都已进入写队列，第 1 步只等队列排空（见第 4 章）。
 
 `register.go` 的注册与元信息（逐字）：
 
@@ -137,8 +138,8 @@ func (p *Plugin) Metadata() bot.Metadata {
 | 协程 | 生命周期 | 上限 |
 | --- | --- | --- |
 | MCP 目录刷新协程 | 管理员 reload 触发，以插件级 ctx 派生超时，完成后退出，由 `p.wg` 跟踪 | 插件级至多 1 个，不排队（[`mcp.md`](mcp.md) §14.6） |
-| 每会话生成协程 | 定时器触发时 `wg.Add(1)` 启动，`generate` 返回时 `Done` | 每会话至多 1 个（`inflight` 保证）；全局至多 `limits_max_concurrent` 个真正调用 LLM 的协程 |
-| 写穿透持久化协程 | 每次状态变更时启动，写完后退出 | 每变更一个，数量由变更频率决定；单次 `Set` 带 1s 超时；由 `writeWG` 跟踪，`Stop` 在取消插件级 ctx 之前等它们结束 |
+| 每会话生成协程 | 批处理窗口结束时通过 `startTask` 登记并启动，`generate` 返回时 `Done` | 每会话至多 1 个（`inflight` 保证；窗口遇到在途生成时保留本轮并短暂重试）；全局至多 `limits_max_concurrent` 个真正调用 LLM 的协程 |
+| 写穿透协程 | `Start` 启动单个 `writeLoop` 常驻，`Stop` 关闭准入并排空队列后退出 | 固定 1 个；按提交顺序串行执行 `Storage.Set`，单次 1s 超时；由 `writerDone` 跟踪，`Stop` 在取消插件级 ctx 之前等队列排空 |
 
 全局信号量 `limits_max_concurrent`（默认 2）用**非阻塞获取**（`TryAcquire`）；获取失败记 `semaphore_full` 并放弃本轮，不排队。
 
@@ -151,7 +152,7 @@ func (p *Plugin) Metadata() bot.Metadata {
 | 工具目录 | `Plugin.toolsMu sync.RWMutex` | 读取时复制快照；网络和工具调用期间不持锁（[`mcp.md`](mcp.md) §14.6）；客户端另同步会话状态和请求 ID |
 | 全局计数器（`/agent status` 汇总行） | `sync/atomic` | 只增不减的累计值 |
 | 最近发送消息 ID 环（reply 寻址用） | `sync.Mutex` | 容量常量 128 的环形缓冲 |
-| 写穿透关闭标记 `closing`（配 `writeWG`）、MCP 刷新在途标记 `mcpRefreshing` | 现有 `writeMu sync.Mutex` | 写穿透、刷新任务准入与 `Stop` 用它串行化关闭判定；写穿透由 `writeWG` 跟踪，刷新由 `p.wg` 跟踪（见 §3.1/§4.6、[`mcp.md`](mcp.md) §14.6） |
+| 写穿透关闭标记 `closing`、写队列 `writeQueue`/`writeCond`/`writerDone`、MCP 刷新在途标记 `mcpRefreshing` | `writeMu sync.Mutex` | 写穿透、任务登记、刷新准入与 `Stop` 用它串行化关闭判定；写队列由单写协程消费，刷新由 `p.wg` 跟踪（见 §3.1/§4.6、[`mcp.md`](mcp.md) §14.6） |
 
 ## 4. 状态与持久化
 
@@ -161,43 +162,54 @@ func (p *Plugin) Metadata() bot.Metadata {
 
 ```go
 type channelState struct {
-	mu         sync.Mutex
-	key        string // platform:botID:channelID（Channel 为空时 platform:botID:user:<senderID>）
-	platform   string
-	botID      string
-	channelID  string
-	kind       bot.MessageKind // 会话类型：group 或 private
-	peerUserID string          // 私聊对端用户 ID（kind == private 时非空）
-	history    []Turn      // 环形，上限 context_max_messages
-	replyTimes []time.Time // 本会话近 1 小时回复时间窗，用于小时配额
+	mu          sync.Mutex
+	key         string // platform:botID:channelID（频道缺失时 platform:botID:user:<senderID>）
+	platform    string
+	botID       string
+	channelID   string
+	channelName string
+	kind        bot.MessageKind // 会话类型：group 或 private
+	peerUserID  string          // 私聊对端用户 ID（kind == private 时非空）
+	history     []Turn      // 有界切片，上限 context_max_messages，超出从最旧丢弃
+	replyTimes  []time.Time // 本会话近 1 小时回复时间窗，用于小时配额
 	lastReplyAt time.Time
-	awaiting   bool
-	firstAt    time.Time
-	lastMsgAt  time.Time
-	timer      *time.Timer
-	inflight   bool
-	epoch      uint64
-	disabled   bool
-	persona    string // 运行时覆盖的人格名，空 = 未覆盖
-	loaded     bool   // Storage 懒加载是否完成
-	pending    *pendingInbound // 懒加载完成前暂存的待决入站消息（有界单槽）
-	lastSenderID string // 最近一条入站消息的真人发送者 ID（用于 reply_mention_sender）
+	lastUsed    time.Time // 最近一次入站使用时间，供 LRU 淘汰
+	awaiting    bool
+	firstAt     time.Time
+	lastMsgAt   time.Time
+	timer       *time.Timer
+	timerSeq    uint64 // 定时器代次：旧回调发现代次不匹配时不得改状态
+	inflight    bool
+	epoch       uint64
+	disabled    bool
+	persona     string // 运行时覆盖的人格名，空 = 未覆盖
+	loaded      bool   // Storage 懒加载是否完成
+	handling    int    // 正在 Handler/补判临界区内处理，LRU 不得淘汰
+	dirtyPersona  bool // 懒加载期间是否被 /agent persona|reset 覆盖
+	dirtyDisabled bool // 懒加载期间是否被 /agent on|off|reset 覆盖
+	pending     *pendingInbound // 懒加载完成前暂存的待决入站消息（有界单槽）
+	lastSenderID  string // 最近一条入站消息的真人发送者 ID（用于 reply_mention_sender）
 	lastAddressed bool  // 触发本轮生成的那条消息是否被判定为寻址
 	pendingKind  string // "addressed" | "random"，本次生成的触发来源（日志用）
 	replies    int // 已回复计数（累计）
 	skips      int // 因 LLM 放弃/空回复/重复而跳过的计数
 	llmErrors  int
 	dropped    int // 信号量满或 stale 丢弃的计数
+	histMax    int
 }
 ```
 
 字段语义要点：
 
-- `history` 环形，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
+- `history` 是有界切片，容量 `context_max_messages`，`appendHistory` 超出后从最旧丢弃。
 - `replyTimes` 只保留近 1 小时（`repliesInWindow` 读取时顺带裁剪）。
-- `epoch` 是「状态代次」：`/agent off`、`/agent persona`、`/agent reset` 递增。定时器回调与生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
+- `lastUsed` 在每条入站消息时更新，是 LRU 的首选依据；`lastMsgAt`（批处理窗口）与 `lastReplyAt` 作为补充参与比较。
+- `timerSeq` 是定时器代次：`schedule`、`onBatch` 重布防、`/agent off|persona|reset` 与 `Stop` 都会递增；旧回调发现代次不匹配时立即返回，不得修改 `awaiting` 或重新布防。
+- `epoch` 是「状态代次」：`/agent off`、`/agent persona`、`/agent reset` 递增。批处理回调在代次不匹配时失效本轮；生成协程捕获发起时的 `epoch`，发现不一致就丢弃结果（reason `stale`）。
 - `loaded` 表示 Storage 懒加载是否完成。未完成前 Handler 不阻塞等待：把本条消息**暂存进 `pending` 单槽**并记 reason `loading`，加载完成后由 `restoreState` 调 `decide` **补判一次**（见 §4.5）。
-- `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text, epoch}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；`epoch` 变化（`/agent reset`）时暂存作废。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。暂存的是 Handler 收到的 `*bot.Event`：核心入队时已复制事件对象并独占副本（浅拷贝，适配器投递后不得再改 `Message`/`Segments`），插件因此可以安全地把事件留存到 Handler 返回之后（见 §6）。
+- `handling` 是正在 Handler/补判内的计数；大于 0 时 LRU 不淘汰该状态，避免在记历史/判定/补判中途丢失状态。
+- `dirtyPersona`/`dirtyDisabled` 分别表示懒加载期间 `/agent persona|reset` 与 `/agent on|off|reset` 改过对应字段。`finishLoad` 逐字段判断：只跳过被命令改过的那一侧，未改过的字段仍从旧快照恢复。
+- `pending` 是「懒加载期间暂存待判消息」的有界单槽（`*pendingInbound{ev, text}`）：加载完成前同一会话只保留最新一条，更早的已进 `history`、仍随本轮生成交给 LLM。暂存/取走同在 `st.mu` 临界区内，消息要么立即判定、要么恰好补判一次，不会被吞掉；只有 `/agent reset` 会清空暂存，`/agent off|persona` 保留暂存并由补判按当前状态处理。带 `pending` 的状态不参与 LRU 淘汰（见 §4.3）。暂存的是 Handler 收到的 `*bot.Event`：核心入队时已复制事件对象并独占副本（浅拷贝，适配器投递后不得再改 `Message`/`Segments`），插件因此可以安全地把事件留存到 Handler 返回之后（见 §6）。
 - `disabled` 表示该会话被 `/agent off` 关闭。
 - `kind` 是会话类型（`bot.MessageGroup` / `bot.MessagePrivate`），决定寻址判定（私聊视为寻址）、发送目标（`message.Group` / `message.Private`）与提示词/历史渲染的会话类型文案。
 - `peerUserID` 是私聊对端用户 ID，私聊发送目标填 `bot.Target.UserID`（`ChannelID` 留空）。
@@ -206,11 +218,11 @@ type channelState struct {
 
 ### 4.2 会话键
 
-群聊会话键为 `platform:botID:channelID`；当 `ev.Channel == nil`（私聊等无频道信息的事件）时回落 `platform:botID:user:<senderID>`。键写入 `channelState.key`，日志字段 `channel=<key>` 与覆盖键都由它派生。
+群聊会话键为 `platform:botID:channelID`；当 `ev.Channel == nil` 或 `ev.Channel.ID == ""`（私聊等无频道信息的事件）时回落 `platform:botID:user:<senderID>`。键写入 `channelState.key`，日志字段 `channel=<key>` 与覆盖键都由它派生。
 
 ### 4.3 LRU 淘汰
 
-内存中最多跟踪 `context_max_channels`（默认 512）个会话。超限时按最近使用时间淘汰，**只淘汰非 `inflight`、非 `awaiting` 且无 `pending` 的状态**（有在途生成、已布防定时器或待补判消息的会话不淘汰；淘汰带 `pending` 的状态等于丢掉那条消息）。淘汰只释放内存，不影响已持久化的覆盖。
+内存中最多跟踪 `context_max_channels`（默认 512）个会话。每条入站消息更新 `lastUsed`；超限时按 `lastUsed`（并用 `lastMsgAt`/`lastReplyAt` 补充）淘汰最久未使用的状态，**只淘汰非 `inflight`、非 `awaiting`、无 `pending` 且 `handling == 0` 的状态**。本次刚创建的会话不参与自己的淘汰，避免新会话在插满时被立即删除；若其它状态都忙则允许短暂超过上限，等它们空闲后再淘汰。淘汰只释放内存，不影响已持久化的覆盖。
 
 ### 4.4 Storage 键与 JSON 形状
 
@@ -228,20 +240,23 @@ type channelState struct {
 首次见到某会话时**异步**触发一次 `Storage.Get`（读该会话的覆盖键）：
 
 - 加载完成前，Handler 只记历史、不判决策：记 reason `loading`，同时把该条消息**暂存进 `channelState.pending` 单槽**（见 §4.1）。Handler 禁止阻塞，因此不能同步等待 `Get`。
-- 加载完成（`finishLoad`）：写回 `persona`、`disabled`，置 `loaded = true`，并在同一临界区内取走 `pending`；取到则用插件级 ctx 调 `decide` **补判一次**（此时判定依据的是加载后的真实打开/关闭状态与人格覆盖，因此不会在 `/agent off` 的会话里发言）。补判只做内存判定与定时器布防，不做网络调用。
+- 加载完成（`finishLoad`）：逐字段写回旧快照——`dirtyPersona=false` 时写回 `persona`，`dirtyDisabled=false` 时写回 `disabled`；置 `loaded = true`，并在同一临界区内取走 `pending`。取到则按**当前**名单策略复核一次（加载期间管理员可能已改策略），再用插件级 ctx 调 `decide` **补判一次**（判定依据是当前开关/人格/策略，因此不会在 `/agent off` 的会话里发言）。补判只做内存判定与定时器布防，不做网络调用。
+- 加载期间执行 `/agent on|off|persona|reset` 会置对应的 `dirtyPersona`/`dirtyDisabled`，`finishLoad` 只跳过被改过的那一侧；`pending` 只在 `/agent reset` 时清空，`/agent off|persona` 保留并由补判按当前状态处理。
+- 加载期间的覆盖写穿透**延后**到 `finishLoad`：此刻内存值才同时包含旧快照与命令变更，避免用只加载了一半的 `persona`/`disabled` 覆盖存储。
 - 效果：新会话（首次出现、进程重启后、被 LRU 淘汰后）的**第一条消息不再被静默吞掉**；加载期间连发的消息只补判最新一条，更早的仍随本轮生成进入 LLM 上下文。
 - 加载失败（含 `bot.ErrNotFound`）：视为无覆盖，同样置 `loaded = true` 并补判，只记 `Debug`/`Warn`。
-- `p.ctx` 为 nil 或 `p.store` 为 nil 时跳过 `Get`，仍然走 `finishLoad`（补判照常生效）。
+- `p.store` 为 nil 时跳过 `Get`；`p.ctx` 为 nil 时直接走 `finishLoad` 置 `loaded`，不做补判（没有运行期 ctx）。两者都不会让 Handler 阻塞。
 
 插件级名单策略是**例外**：在 `Start` 阶段同步读一次（见 §3.1），不参与每会话懒加载。
 
 ### 4.6 写穿透异步化
 
-内存是唯一事实来源。每次覆盖/开关变更后**异步**启动一次 `Storage.Set`；名单策略变更（`setPolicyMode`/`addPolicyID`/`delPolicyID` 且真的发生变更时）走同形的写穿透：
+内存是唯一事实来源。每次覆盖/开关变更后**异步**把一次 `Storage.Set` 放入队列；名单策略变更（`setPolicyMode`/`addPolicyID`/`delPolicyID` 且真的发生变更时）走同形的写穿透：
 
+- `Start` 启动单个 `writeLoop`，按提交顺序 FIFO 执行队列中的写入；同一键的后提交值必然后落库，不会出现旧快照覆盖新状态。
 - 写操作带 1s 超时（派生自插件级 ctx）。
 - 失败只记 `Warn`，不重试、不回滚（内存仍为准）。
-- `Stop` 会先置 `closing`（拒绝新写入）并 `writeWG.Wait()`，**然后**才取消插件级 ctx；因此「写入后立即关闭」在持久化后端上不会丢数据（内存后端观察不到这个差别）。每次写入自带 1s 超时，故这次等待有界。
+- `Stop` 会先置 `closing`（拒绝新写入）、广播队列并等待 `writerDone`（队列排空），**然后**才取消插件级 ctx；因此「写入后立即关闭」在持久化后端上不会丢数据。每次写入自带 1s 超时，故这次等待有界。
 
 ### 4.7 重启语义
 
@@ -261,7 +276,7 @@ kei-plugin-persona/
 ├── config.go        配置结构、读取与默认值、校验（loadConfig）
 ├── persona.go       人格预设解析、绑定匹配、提示词模板渲染
 ├── decision.go      接话决策：过滤、寻址判定、随机参与、批处理定时器
-├── state.go         每会话状态、历史环、计数器、Storage 读写
+├── state.go         每会话状态、有界历史、计数器、Storage 读写
 ├── llm.go           OpenAI 兼容客户端（请求/响应/重试/超时）
 ├── vision.go        图片下载与 base64 内联（地址限制、体积上限、格式白名单、失败丢弃）
 ├── tools.go         工具接口、按人格过滤、目录快照与工具调用循环
@@ -275,7 +290,7 @@ kei-plugin-persona/
 ├── mcp_test.go      MCP 调用、刷新、并发快照与取消（共用 httptest.Server 桩）
 ├── persona_test.go  人格解析、模板渲染、历史渲染、清洗单测
 ├── policy_test.go   名单策略单测（模式矩阵/命令输出/持久化/启动恢复）
-├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍可用、Stop 等待在途写穿透）
+├── plugin_test.go   生命周期单测（阶段 ctx 取消后运行期仍可用、Stop 排空写队列）
 ├── helpers_test.go  测试桩与测试环境构造
 ├── e2e_test.go      Mock 适配器端到端测试
 ├── docs/            设计文档（本目录即实现口径）
@@ -290,9 +305,9 @@ kei-plugin-persona/
 | `config.go` | 从 `*bot.Config` 读取全部键、填默认值、`loadConfig` 校验并返回 `config` 结构。 |
 | `persona.go` | `personas`/`bindings` 解析、人格解析优先级、`persona_template` 渲染、历史渲染、回复清洗。 |
 | `decision.go` | 群聊/私聊消息过滤、名单放行判定、寻址判定、随机参与判定、批处理定时器（`handleChat`/`schedule`/`onBatch`/`generate`）。 |
-| `state.go` | `channelState`、历史环、计数器、LRU、Storage 懒加载/写穿透。 |
+| `state.go` | `channelState`、有界历史、计数器、LRU、Storage 懒加载/写穿透。 |
 | `llm.go` | `completer` 接口与 `openaiClient` 实现（请求构造、响应解析、超时重试）。 |
-| `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
+| `vision.go` | 图片下载与 base64 data URL 编码：地址限制拨号器（含 CGNAT/特殊用途段、清空 TLS 拨号钩子）、体积上限、格式白名单（llm_vision_allowed_formats）、失败丢弃、debug 日志折叠。 |
 | `tools.go` | `tool` 接口、`toolResult`、按人格过滤 `toolsFor`、目录快照/整体替换、工具调用循环 `completeWithTools`/`runTool`（轮数与每轮调用上限、超时与长度兜底、epoch 复核），见 [`mcp.md`](mcp.md) §13.2-13.4。 |
 | `mcp.go` | `mcpClient`/`mcpTool`：初始化、HTTP/SSE、会话、工具列表与调用、结果转换；唯一工具来源，见 [`mcp.md`](mcp.md) 第 14 章。 |
 | `commands.go` | `/agent status|persona|on|off|reset|policy|list|tools` 子命令实现。 |

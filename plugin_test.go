@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,5 +172,88 @@ func TestCommandTriggerName(t *testing.T) {
 	}
 	if match("/persona status") {
 		t.Fatal("/persona 不应再命中命令规则")
+	}
+}
+
+// orderedSetStorage 记录 Set 调用顺序，并让第一次写入阻塞到 gate 关闭。
+type orderedSetStorage struct {
+	*fakeStorage
+	mu       sync.Mutex
+	calls    int
+	first    chan struct{}
+	second   chan struct{}
+	gate     chan struct{}
+	firstErr error
+}
+
+func (s *orderedSetStorage) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	s.mu.Lock()
+	s.calls++
+	n := s.calls
+	s.mu.Unlock()
+	switch n {
+	case 1:
+		close(s.first)
+		select {
+		case <-s.gate:
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.firstErr = ctx.Err()
+			s.mu.Unlock()
+			return ctx.Err()
+		}
+	case 2:
+		close(s.second)
+	}
+	return s.fakeStorage.Set(ctx, key, value, ttl)
+}
+
+// TestWriteThroughSerialized 回归：写穿透必须按提交顺序串行落库，旧快照不能后完成。
+func TestWriteThroughSerialized(t *testing.T) {
+	store := &orderedSetStorage{
+		fakeStorage: newFakeStorage(),
+		first:       make(chan struct{}),
+		second:      make(chan struct{}),
+		gate:        make(chan struct{}),
+	}
+	env := newTestEnvWith(t, nil, nil, store, nil)
+	env.waitLoaded(groupEvent("g1", "u1", "张三", "hi"))
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(store.gate) }) }
+	t.Cleanup(release)
+
+	env.command("persona", "tsundere")
+	select {
+	case <-store.first:
+	case <-time.After(time.Second):
+		t.Fatal("第一次写穿透未开始")
+	}
+	env.command("persona", "default")
+
+	select {
+	case <-store.second:
+		t.Fatal("第二次写穿透在第一次完成前启动")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var raw string
+	for time.Now().Before(deadline) {
+		if v, ok := store.value(overrideKey("mock:bot1:g1")); ok && strings.Contains(v, `"default"`) {
+			raw = v
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(raw, `"default"`) {
+		t.Fatalf("最终落库值不是最新状态: %q", raw)
+	}
+	store.mu.Lock()
+	err := store.firstErr
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("第一次写入被错误取消: %v", err)
 	}
 }

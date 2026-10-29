@@ -308,7 +308,7 @@ func TestToolLoopStale(t *testing.T) {
 	epoch := st.epoch
 	st.mu.Unlock()
 	env.p.wg.Add(1)
-	env.p.generate(st, epoch, nil)
+	env.p.generate(st, epoch, nil, generationRound{kind: "random"})
 	if !env.cap.has("stale") {
 		t.Fatal("want stale")
 	}

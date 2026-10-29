@@ -24,7 +24,9 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 	if args := ev.Command.Args; len(args) > 0 && args[0] == "tools" {
 		return p.handleToolsCommand(ctx, bot.TargetFromEvent(ev), r, args[1:])
 	}
-	st := p.stateFor(ev)
+	st := p.acquireState(ev)
+	st.touch(p.now())
+	defer st.endHandle()
 	args := ev.Command.Args
 	if len(args) == 0 {
 		return r.Text(personaUsage()).Send(ctx)
@@ -42,30 +44,31 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 		}
 		st.mu.Lock()
 		st.persona = name
+		st.dirtyPersona = true
 		st.epoch++
+		st.invalidateBatchLocked()
 		st.mu.Unlock()
-		p.saveOverride(st)
+		p.saveOverrideIfLoaded(st)
 		return r.Text("persona: persona=" + name).Send(ctx)
 	case "on":
 		st.mu.Lock()
 		st.disabled = false
+		st.dirtyDisabled = true
 		st.mu.Unlock()
-		p.saveOverride(st)
+		p.saveOverrideIfLoaded(st)
 		return r.Text("persona: 已开启").Send(ctx)
 	case "off":
 		st.mu.Lock()
 		st.disabled = true
+		st.dirtyDisabled = true
 		st.epoch++
-		if st.timer != nil {
-			st.timer.Stop()
-			st.timer = nil
-		}
+		st.invalidateBatchLocked()
 		st.mu.Unlock()
-		p.saveOverride(st)
+		p.saveOverrideIfLoaded(st)
 		return r.Text("persona: 已关闭").Send(ctx)
 	case "reset":
 		st.reset()
-		p.saveOverride(st)
+		p.saveOverrideIfLoaded(st)
 		return r.Text("persona: 已重置").Send(ctx)
 	case "policy":
 		if len(args) == 1 {
@@ -82,11 +85,12 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 		case len(args) == 2 && (args[1] == scopeGroup || args[1] == scopePrivate):
 			return r.Text(p.listScopeReport(args[1])).Send(ctx)
 		case len(args) == 4 && (args[1] == scopeGroup || args[1] == scopePrivate) && args[3] != "":
-			if args[2] == "add" {
+			switch args[2] {
+			case "add":
 				p.addPolicyID(args[1], args[3])
-			} else if args[2] == "del" {
+			case "del":
 				p.delPolicyID(args[1], args[3])
-			} else {
+			default:
 				return r.Text(personaUsage()).Send(ctx)
 			}
 			return r.Text(p.listScopeReport(args[1])).Send(ctx)

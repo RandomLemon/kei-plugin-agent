@@ -80,24 +80,27 @@ addressed = 私聊 || mention || reply_to_self || keyword
 
 判定通过后**不立即生成**，而是在本会话布防一个 `time.AfterFunc` 定时器；窗口内到达的新消息并入**同一轮**生成，让 LLM 看到完整上下文再决定。
 
-三个字段决定算法：`awaiting`（是否已布防）、`firstAt`（本轮首次判定时间）、`lastMsgAt`（本轮最近一条消息时间）。
+四个字段决定算法：`awaiting`（是否已布防）、`firstAt`（本轮首次判定时间）、`lastMsgAt`（本轮最近一条消息时间）、`timerSeq`（定时器代次，用于作废旧回调）。
 
 **确定性算法**
 
-1. 布防（`schedule`）：置 `awaiting = true`、`pendingKind = kind`、`lastAddressed`、`lastSenderID`；`firstAt` 为零则置 `now`；更新 `lastMsgAt = now`。延迟 `delay = min(batch_window, firstAt + batch_max_window - now)`，`delay < 0` 取 0。若已有定时器先 `Stop`，重新布防并捕获当前 `epoch`。
-2. 回调（`onBatch`）：
-   - `epoch` 已变或 `!awaiting` → 静默返回；
-   - 若 `now - lastMsgAt < batch_window` **且** `now - firstAt < batch_max_window` → 重新布防（延迟 `min(batch_window - (now - lastMsgAt), firstAt + batch_max_window - now)`），返回；
-   - 否则开始生成：置 `awaiting = false`、`firstAt` 归零；若 `inflight` 已为真则放弃（已有在途生成）；否则置 `inflight = true`、快照历史、启动生成协程。
-3. 生成完成（成功或失败）后置 `inflight = false`。
+1. 布防（`schedule`）：置 `awaiting = true`、`pendingKind = kind`、`lastAddressed`、`lastSenderID`；`firstAt` 为零则置 `now`；更新 `lastMsgAt = now`。延迟 `delay = min(batch_window, firstAt + batch_max_window - now)`，`delay < 0` 取 0。若已有定时器先 `Stop`，递增 `timerSeq` 并捕获 `epoch` 与 `seq`。
+2. 回调（`onBatch(st, epoch, seq)`）：
+   - `timerSeq != seq` → 该回调已被更新的布防/关闭取代，直接返回，不得修改状态；
+   - 插件 ctx 已取消或 `epoch` 已变或 `!awaiting` → 失效本轮（停 timer、`timerSeq++`、清 `awaiting`/`firstAt`）后返回；
+   - 若 `now - lastMsgAt < batch_window` **且** `now - firstAt < batch_max_window` → 重新布防（延迟 `min(batch_window - (now - lastMsgAt), firstAt + batch_max_window - now)`），递增 `timerSeq` 后返回；
+   - 若 `inflight` 已为真 → **保留本轮**，以 `inflight_retry_delay=100ms` 重试，直到在途生成结束；不丢弃寻址消息；
+   - 否则开始生成：置 `awaiting = false`、`firstAt` 归零，捕获本轮 `kind`/`senderID`/`addressed`/`chatKind` 后置 `inflight = true`、快照历史，在关闭准入锁内登记任务并启动生成协程。
+3. 生成完成（成功或失败）后置 `inflight = false`；若有保留的重试批处理，其定时器会在 100ms 内再次触发。
+4. `/agent off`、`/agent persona`、`/agent reset` 与 `Stop` 都会递增 `timerSeq` 并清空 `awaiting`，旧回调因此不会留下永久 busy 状态。
 
 `batch_window`（默认 `2.5s`）是「说话前的静默等待」；`batch_max_window`（默认 `8s`）是「自首次判定起最长等待」上限，防止消息持续刷屏导致永不触发。
 
 ## 7.5 生成与发送
 
-- **本轮要求块**：系统提示词按轮次与 `llm_skip_enabled` 生成——`st.pendingKind == "addressed"`（私聊、@ 本机器人、引用本机器人、命中 `trigger_keywords`）时追加**必须回一句、不要输出哨兵**的块；随机轮次在 `llm_skip_enabled=true`（默认）时追加允许输出哨兵的块，关闭时追加同样的必须回一句块（逐字文本见 [`persona.md`](persona.md) §8.5）。因此被 @、私聊，以及关闭开关后的随机轮次都**不向模型提供 skip 出口**；模型若仍输出哨兵，按 [`persona.md`](persona.md) §8.7 清洗管线第 3 步丢弃（`skipped_by_llm`），不把哨兵文本当回复发出。
+- **本轮要求块**：系统提示词按轮次与 `llm_skip_enabled` 生成——本轮捕获的 `round.kind == "addressed"`（私聊、@ 本机器人、引用本机器人、命中 `trigger_keywords`）时追加**必须回一句、不要输出哨兵**的块；随机轮次在 `llm_skip_enabled=true`（默认）时追加允许输出哨兵的块，关闭时追加同样的必须回一句块（逐字文本见 [`persona.md`](persona.md) §8.5）。因此被 @、私聊，以及关闭开关后的随机轮次都**不向模型提供 skip 出口**；模型若仍输出哨兵，按 [`persona.md`](persona.md) §8.7 清洗管线第 3 步丢弃（`skipped_by_llm`），不把哨兵文本当回复发出。
 - **信号量**：全局 `limits_max_concurrent`（默认 2），`TryAcquire` 非阻塞获取；失败记 `semaphore_full`，丢弃本轮，不排队。获取成功 `defer Release`。
-- **epoch 机制**：生成协程捕获发起时的 `epoch`。`/agent off`、`/agent persona`、`/agent reset` 会递增 `epoch`；回调或生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」。
+- **epoch/timerSeq 机制**：生成协程捕获发起时的 `epoch`；批处理回调还捕获 `timerSeq`。`/agent off`、`/agent persona`、`/agent reset` 会递增 `epoch` 并使当前批处理失效；生成协程发现 `st.epoch != captured` 即丢弃结果，reason `stale`。旧定时器回调先看 `timerSeq`，不匹配时静默返回，不修改状态。这保证「刚被关掉或刚换人格的会话，旧在途结果不落地」，也不会留下永久 `awaiting`。
 - **发送**：按会话类型分派，**不用** `TargetFromEvent`：
   - 群聊：`message.Group(segs...)` + `bot.Target{Platform, BotID, ChannelID, Kind: bot.MessageGroup}`（不填 `UserID`）；
   - 私聊：`message.Private(segs...)` + `bot.Target{Platform, BotID, UserID: 对端用户 ID, Kind: bot.MessagePrivate}`（不填 `ChannelID`）。
@@ -130,6 +133,7 @@ handleChat(ev):
     if !policyAllowsGroup(channelID):              return log(decision="skip", reason="not_allowed")  # 早于 stateFor
   text, parts = renderMessage(ev.Message)         # 扁平文本 + 分段结构（图片段在原位置）
   st   = stateFor(ev)                             # 首次出现时异步触发 Storage 懒加载
+  st.touch(p.now())                               # 更新 LRU 最近使用时间
   if ev.Command == nil:                           st.appendHistory(userTurn(ev, text, parts))    # 命令一律不进历史
 
   if !st.deferOrLoaded(ev, text):                 # 懒加载未完成：暂存本条（有界单槽），
@@ -173,29 +177,45 @@ schedule(st, kind):
   delay = min(batch_window, st.firstAt + batch_max_window - now)
   if delay < 0: delay = 0
   if st.timer != nil: st.timer.Stop()
-  epoch = st.epoch
-  st.timer = time.AfterFunc(delay, func(){ p.onBatch(st, epoch) })
+  st.timerSeq++
+  epoch, seq = st.epoch, st.timerSeq
+  st.timer = time.AfterFunc(delay, func(){ p.onBatch(st, epoch, seq) })
   return log(decision="reply", kind=kind)
 
-onBatch(st, epoch):
+onBatch(st, epoch, seq):
   st.mu.Lock()
-  if st.epoch != epoch: { st.mu.Unlock(); return }          # epoch 已变，静默丢弃
-  if !st.awaiting:      { st.mu.Unlock(); return }          # 已被本轮处理
+  if st.timerSeq != seq: { st.mu.Unlock(); return }          # 已被更新的布防/关闭取代
+  if p.ctx == nil || p.ctx.Err() != nil:                     # Stop 已开始
+    st.invalidateBatchLocked()                               # stop timer、timerSeq++、清 awaiting/firstAt
+    st.mu.Unlock(); return
+  if st.epoch != epoch || !st.awaiting:
+    st.invalidateBatchLocked()
+    st.mu.Unlock(); return
   now = p.now()
   if now - st.lastMsgAt < batch_window && now - st.firstAt < batch_max_window:
     delay = min(batch_window - (now - st.lastMsgAt), st.firstAt + batch_max_window - now)
-    st.timer = time.AfterFunc(delay, func(){ p.onBatch(st, epoch) })
+    st.timerSeq++
+    next = st.timerSeq
+    st.timer = time.AfterFunc(delay, func(){ p.onBatch(st, epoch, next) })
+    st.mu.Unlock(); return
+  if st.inflight:                                            # 保留本轮，短暂重试
+    st.timerSeq++
+    next = st.timerSeq
+    st.timer = time.AfterFunc(100ms, func(){ p.onBatch(st, epoch, next) })
     st.mu.Unlock(); return
   st.awaiting = false
   st.firstAt  = zeroTime
-  if st.inflight { st.mu.Unlock(); return }                 # 已有在途生成
+  st.timer    = nil
   st.inflight = true
+  round = { kind: st.pendingKind, senderID: st.lastSenderID,
+            addressed: st.lastAddressed, chatKind: st.kind }
   history = st.snapshotHistory(context_max_messages)
   st.mu.Unlock()
-  p.wg.Add(1)
-  go p.generate(st, epoch, history)
+  if !p.startTask():                                         # 关闭准入锁内登记
+    st.mu.Lock(); st.inflight = false; st.mu.Unlock(); return
+  go p.generate(st, epoch, history, round)
 
-generate(st, epoch, history):
+generate(st, epoch, history, round):
   defer p.wg.Done()
   defer func(){ st.mu.Lock(); st.inflight = false; st.mu.Unlock() }()
 
@@ -207,13 +227,13 @@ generate(st, epoch, history):
   personaName = resolvePersona(st)              # 覆盖 > bindings > default_persona
   st.mu.Unlock()
 
-  mustReply = (pendingKind == "addressed")          # 私聊/@/引用/关键词：提示词不提供 skip 出口（persona.md §8.5）
+  mustReply = (round.kind == "addressed")           # 私聊/@/引用/关键词：提示词不提供 skip 出口（persona.md §8.5）
                                                      # llm_skip_enabled=false 时随机轮次也无 skip 出口（选块在 renderSystemPrompt 内）
   trimmed = p.trimHistory(history)                  # 与文本裁剪同一结果，图片槽位与之一一对应
   slots   = p.fetchVisionSlots(p.ctx, p.selectVisionSlots(trimmed))  # 关闭视觉或无图时为 nil；失败槽位留空
   req = completionRequest{
     System:      renderSystemPrompt(personaName, st, history, mustReply),
-    User:        renderUserContent(st.kind, trimmed, slots),  # 首块头 + 每条历史自己的块，图片在原位置
+    User:        renderUserContent(round.chatKind, trimmed, slots),  # 首块头 + 每条历史自己的块，图片在原位置
     Temperature: personaTemperature(personaName),   # 默认 llm_temperature
     MaxTokens:   personaMaxTokens(personaName),     # 默认 llm_max_tokens
   }
@@ -237,9 +257,9 @@ generate(st, epoch, history):
   st.mu.Lock()
   if st.epoch != epoch: { st.mu.Unlock(); return log(decision="skip", reason="stale") }
   segs = [message.Text(reply)]
-  if reply_mention_sender && st.lastAddressed && st.kind == group:
-      segs = prepend(message.At(st.lastSenderID), segs)   # At 段仅群聊
-  if st.kind == private:
+  if reply_mention_sender && round.addressed && round.chatKind == group:
+      segs = prepend(message.At(round.senderID), segs)    # At 段仅群聊，使用本轮捕获的发送者
+  if round.chatKind == private:
     msg    = message.Private(segs...)
     target = bot.Target{Platform: st.platform, BotID: st.botID, UserID: st.peerUserID, Kind: bot.MessagePrivate}
   else:
@@ -255,7 +275,7 @@ generate(st, epoch, history):
   p.rememberReplyID(res.MessageID)                    # 入方向 128 条 ID 环
   st.replies++
   st.mu.Unlock()
-  return log(decision="reply", kind=st.pendingKind)
+  return log(decision="reply", kind=round.kind)
 ```
 
 `log(...)` 的输出契约：`decision=reply` 行含 `kind=addressed|random`；`decision=skip` 行必须含 `reason="<token>"`，`channel=<key>`、`sender=<id>` 为固定字段；`debug_prompts=true` 时由 LLM 客户端以 `persona llm 请求` 输出请求体、以 `persona llm 响应` 输出响应体（`body` 各截断 2048 字符，见 [`llm.md`](llm.md) §9.5）。

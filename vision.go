@@ -34,15 +34,47 @@ func newVisionClient(base *http.Client) *http.Client {
 	}
 	tr.Proxy = nil
 	tr.DialContext = dialVisionSafe
+	// 宿主自定义的 DialTLS/DialTLSContext 会绕过拨号地址校验，图片下载一律
+	// 走受限的 DialContext。
+	tr.DialTLS = nil //nolint:staticcheck // 仍使用已弃用 DialTLS 的宿主客户端同样不能绕过地址校验
+	tr.DialTLSContext = nil
 	return &http.Client{Transport: tr}
 }
 
+// blockedVisionPrefixes 是 netip 方法未覆盖的特殊用途地址段（CGNAT、保留、
+// 文档、NAT64/6to4 等）。图片 URL 来自聊天消息，必须按不可信输入处理，
+// 否则可用 100.100.100.200 一类地址访问云元数据服务。
+var blockedVisionPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // 本网络
+	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT，含部分云元数据地址
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF 协议分配
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmark
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
+	netip.MustParsePrefix("240.0.0.0/4"),     // 保留，含 255.255.255.255
+	netip.MustParsePrefix("100::/64"),        // discard-only
+	netip.MustParsePrefix("2001::/32"),       // Teredo
+	netip.MustParsePrefix("2001:2::/48"),     // benchmark
+	netip.MustParsePrefix("2001:db8::/32"),   // 文档
+	netip.MustParsePrefix("2002::/16"),       // 6to4
+	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64
+}
+
 // blockedVisionAddr 判定地址是否禁止访问：回环、私网、链路本地单播/组播、
-// 接口本地组播、组播、未指定、非法地址一律拒绝。
+// 接口本地组播、组播、未指定、非法地址及特殊用途段一律拒绝。
 func blockedVisionAddr(a netip.Addr) bool {
 	a = a.Unmap()
-	return !a.IsValid() || a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() ||
-		a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified()
+	if !a.IsValid() || a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() ||
+		a.IsLinkLocalMulticast() || a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified() {
+		return true
+	}
+	for _, p := range blockedVisionPrefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // dialVisionSafe 解析主机名并逐个校验解析结果，只拨号到通过校验的地址。

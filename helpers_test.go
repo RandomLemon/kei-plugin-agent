@@ -222,6 +222,26 @@ func (s *blockingStorage) Get(ctx context.Context, key string) ([]byte, error) {
 	return s.fakeStorage.Get(ctx, key)
 }
 
+// blockingOverrideStorage 只阻塞会话覆盖键的 Get；policy 键正常返回，
+// 用于测试懒加载期间的命令/策略竞争。
+type blockingOverrideStorage struct {
+	*fakeStorage
+	gate     chan struct{}
+	snapshot []byte
+}
+
+func (s *blockingOverrideStorage) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == policyKey {
+		return s.fakeStorage.Get(ctx, key)
+	}
+	select {
+	case <-s.gate:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return append([]byte(nil), s.snapshot...), nil
+}
+
 // ---- 假 Registrar ----
 
 type fakeRegistrar struct {

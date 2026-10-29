@@ -3,6 +3,7 @@ package persona
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -14,6 +15,9 @@ func TestBlockedVisionAddr(t *testing.T) {
 	blocked := []string{
 		"127.0.0.1", "::1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
 		"169.254.1.1", "fe80::1", "0.0.0.0", "::", "224.0.0.1", "::ffff:127.0.0.1",
+		"100.64.0.1", "100.100.100.200", "192.0.0.1", "192.0.2.1",
+		"198.18.0.1", "198.51.100.1", "203.0.113.1", "240.0.0.1", "255.255.255.255",
+		"100::1", "2001::1", "2001:2::1", "2001:db8::1", "2002::1", "64:ff9b::1",
 	}
 	for _, s := range blocked {
 		a, err := netip.ParseAddr(s)
@@ -326,5 +330,24 @@ func TestVisionDefaultsOffNoImageBlocks(t *testing.T) {
 		{Kind: turnPartImage, URL: "http://x/1.jpg"},
 	}}}); got != nil {
 		t.Fatalf("默认配置下应返回 nil, got %#v", got)
+	}
+}
+
+// TestVisionClientClearsDialTLS 回归：宿主自定义 TLS 拨号钩子不能绕过地址校验。
+func TestVisionClientClearsDialTLS(t *testing.T) {
+	base := &http.Client{Transport: &http.Transport{
+		DialTLSContext: func(context.Context, string, string) (net.Conn, error) { return nil, nil },
+		DialTLS:        func(string, string) (net.Conn, error) { return nil, nil },
+	}}
+	vc := newVisionClient(base)
+	tr, ok := vc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T", vc.Transport)
+	}
+	if tr.DialTLSContext != nil || tr.DialTLS != nil { //nolint:staticcheck // 兼容性回归需要检查已弃用字段
+		t.Fatal("图片客户端保留了可绕过地址校验的 TLS 拨号钩子")
+	}
+	if tr.Proxy != nil {
+		t.Fatal("图片客户端不应保留代理")
 	}
 }
