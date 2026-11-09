@@ -1,12 +1,12 @@
 # 设计文档
 
-`kei-plugin-persona` 的设计文档集，是本插件**目标实现口径**的唯一来源。文档用中文编写，章号 1-14 连续编号；跨文档引用统一写成 `文件.md#锚点`。
+`kei-plugin-persona` 的设计文档集，是本插件**目标实现口径**的唯一来源。文档用中文编写，章号 1-16 连续编号；跨文档引用统一写成 `文件.md#锚点`。
 
-交付状态以 [`roadmap.md`](roadmap.md) §12.1 为准。行为变更先改文档、再改代码；方案阶段的内容也在该节标明实现状态。
+交付状态以 [`roadmap.md`](roadmap.md) §12.1 为准；记忆系统的实现进度由 §12.1 指向 [`memory/progress.md`](memory/progress.md)。行为变更先改文档、再改代码；方案阶段的内容也在该节标明实现状态。
 
 ## 1. 文档索引
 
-本表是**全仓库唯一的文档索引**，兼当「章号↔文件对应」表；`AGENTS.md` 与根 `README.md` 只指向本表，不复制。
+本表是**全仓库的顶层文档索引**，兼当「章号↔文件对应」表；记忆系统只列入口 [`memory/overview.md`](memory/overview.md)，`docs/memory/` 下的其余文档（含第 16 章）由该文开头的「文档索引」登记。`AGENTS.md` 与根 `README.md` 只指向本表，不复制。
 
 | 文件 | 章号 | 内容 |
 | --- | --- | --- |
@@ -16,9 +16,10 @@
 | [`persona.md`](persona.md) | 8 | 人格系统：预设库、绑定与优先级、运行时覆盖与 `/agent` 命令、提示词模板、历史渲染、回复清洗 |
 | [`llm.md`](llm.md) | 9 | LLM 客户端：协议/请求/响应、超时重试与错误、长度与成本、密钥与日志安全、替换其他 OpenAI 兼容服务 |
 | [`configuration.md`](configuration.md) | 10 | 全量配置键表（权威）、示例配置、环境变量覆盖、`personas`/`bindings` 结构、校验规则 |
-| [`testing.md`](testing.md) | 11 | 质量门、单元测试矩阵与注入缝、mock 适配器端到端联调、竞态与优雅关闭 |
+| [`testing.md`](testing.md) | 11 | 质量门、单元测试矩阵与注入缝、mock 适配器端到端联调、竞态与优雅关闭、本地联调宿主（devhost） |
 | [`roadmap.md`](roadmap.md) | 12 | 交付物现状、P1-P7 与 MCP 分阶段规划、已知缺口 |
 | [`mcp.md`](mcp.md) | 13-14 | 通用工具接口、人格过滤与调用循环、MCP 协议与适配、运行时目录刷新、并发快照、生命周期、分阶段实现与验收 |
+| [`memory/overview.md`](memory/overview.md) | 15 起 | 记忆系统入口：开头是记忆系统文档索引（各层实现、进度文档与其他文档中的记忆章节），正文是第 15 章总体方案 |
 
 ## 2. 建议阅读顺序
 
@@ -32,11 +33,12 @@
 6. [`testing.md`](testing.md) 第 11 节：如何验证以上全部行为。
 7. [`roadmap.md`](roadmap.md) 第 12 节：交付物现状与实现阶段划分。
 8. [`mcp.md`](mcp.md) 第 13-14 章：工具调用接口与循环、MCP 接入、运行时目录刷新与实施规划。
+9. [`memory/overview.md`](memory/overview.md) 第 15 章：记忆系统总体方案，再按该文开头的文档索引看各层的具体实现（第 16 章起）。
 
 ## 3. 文档约定
 
-- **章号连续**：1-14 全局唯一，不分文档重置；节号写成 `章.节`（如 §10.1），跨文档引用统一写成 `文件.md#锚点`。示例：[`architecture.md#3-生命周期与并发模型`](architecture.md#3-生命周期与并发模型)、[`participation.md#76-决策伪代码`](participation.md#76-决策伪代码)、[`participation.md#77-决策日志与-reason-词表`](participation.md#77-决策日志与-reason-词表)、[`persona.md#85-系统提示词模板`](persona.md#85-系统提示词模板)、[`configuration.md#101-全量配置键表`](configuration.md#101-全量配置键表)、[`configuration.md#104-校验规则`](configuration.md#104-校验规则)、[`testing.md#112-单元测试矩阵`](testing.md#112-单元测试矩阵)。
+- **章号连续**：1-16 全局唯一，不分文档重置；节号写成 `章.节`（如 §10.1），跨文档引用统一写成 `文件.md#锚点`。示例：[`architecture.md#3-生命周期与并发模型`](architecture.md#3-生命周期与并发模型)、[`participation.md#76-决策伪代码`](participation.md#76-决策伪代码)、[`participation.md#77-决策日志与-reason-词表`](participation.md#77-决策日志与-reason-词表)、[`persona.md#85-系统提示词模板`](persona.md#85-系统提示词模板)、[`configuration.md#101-全量配置键表`](configuration.md#101-全量配置键表)、[`configuration.md#104-校验规则`](configuration.md#104-校验规则)、[`testing.md#112-单元测试矩阵`](testing.md#112-单元测试矩阵)。
 - **签名与配置键取自设计口径**：函数签名、结构体字段、配置键名与默认值全部以本文档集为准；配置键以 [`configuration.md`](configuration.md) 第 10 节为唯一权威，其它文档引用必须与其逐字一致。
 - **固定字面量**：提示词模板（[`persona.md`](persona.md) §8.5）、决策伪代码与 reason token（[`participation.md`](participation.md) §7.6-7.7）、配置校验错误文案（[`configuration.md`](configuration.md) §10.4）、`/agent` 输出行（[`persona.md`](persona.md) §8.4）、工具接口（[`mcp.md`](mcp.md) §13.2）、循环层工具结果文本与日志 status（§13.4、§13.6）都是逐字约定，实现者不得改写。
-- **新增文档必须同步索引**：本节 §1 的索引表（全仓库唯一一份）；[`../AGENTS.md`](../AGENTS.md) 与根 `README.md` 只做指向，不复制列表。
-- **状态口径**：文档描述目标实现；与现状有关的判断只在 [`roadmap.md`](roadmap.md) 记录。
+- **新增文档必须同步索引**：顶层文档同步本节 §1 的索引表；`docs/memory/` 下的文档，以及其他文档中记忆相关章节的新增、移动、删除，同步 [`memory/overview.md`](memory/overview.md) 开头的文档索引；[`../AGENTS.md`](../AGENTS.md) 与根 `README.md` 只做指向，不复制列表。
+- **状态口径**：文档描述目标实现；与现状有关的判断只在 [`roadmap.md`](roadmap.md) 记录。唯一例外是记忆系统：阶段级状态只记在 [`memory/progress.md`](memory/progress.md)，各层的细分进度只记在该层目录下的 `progress.md`（如 [`memory/summary-layer/progress.md`](memory/summary-layer/progress.md)），设计文档与 `roadmap.md` 只做指向。

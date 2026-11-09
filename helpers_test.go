@@ -14,7 +14,97 @@ import (
 	"time"
 
 	"github.com/RandomLemon/kei/pkg/bot"
+
+	"github.com/RandomLemon/kei-plugin-persona/internal/memory"
 )
+
+// ---- 记忆后端 ----
+
+// fakeMemory 是记录调用的 memoryBackend。
+type fakeMemory struct {
+	mu        sync.Mutex
+	records   []memory.Record
+	reject    bool // 为真时 Enqueue 返回 false 且不记录
+	started   bool
+	stopped   bool
+	onStop    func() // Stop 时回调，供断言调用时机
+	stats     memory.Stats
+	contextFn func(context.Context, memory.ContextRequest) (memory.ContextResult, error)
+	requests  []memory.ContextRequest
+	queryFn   func(context.Context, memory.SummaryQuery) ([]memory.SummaryItem, error)
+}
+
+func (m *fakeMemory) Start(context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.started = true
+}
+
+func (m *fakeMemory) Stop(context.Context) {
+	m.mu.Lock()
+	m.stopped = true
+	onStop := m.onStop
+	m.mu.Unlock()
+	if onStop != nil {
+		onStop()
+	}
+}
+
+func (m *fakeMemory) Enqueue(r memory.Record) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reject {
+		return false
+	}
+	m.records = append(m.records, r)
+	return true
+}
+
+func (m *fakeMemory) Stats() memory.Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stats
+}
+
+func (m *fakeMemory) Context(ctx context.Context, req memory.ContextRequest) (memory.ContextResult, error) {
+	m.mu.Lock()
+	m.requests = append(m.requests, req)
+	fn := m.contextFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return memory.ContextResult{}, nil
+}
+
+func (m *fakeMemory) QuerySummaries(ctx context.Context, req memory.SummaryQuery) ([]memory.SummaryItem, error) {
+	m.mu.Lock()
+	fn := m.queryFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, req)
+	}
+	return nil, nil
+}
+
+// snapshot 返回已入队记录的副本。
+func (m *fakeMemory) snapshot() []memory.Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]memory.Record(nil), m.records...)
+}
+
+// waitRecords 等待入队记录数达到 n。
+func (m *fakeMemory) waitRecords(n int, d time.Duration) []memory.Record {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if rs := m.snapshot(); len(rs) >= n {
+			return rs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return m.snapshot()
+}
 
 // ---- 日志捕获 ----
 
@@ -356,6 +446,12 @@ func newTestEnv(t *testing.T, llm http.Handler, mutate func(map[string]any)) *te
 // newTestEnvWith 允许注入自定义 Storage 与 BotAPI。
 func newTestEnvWith(t *testing.T, llm http.Handler, mutate func(map[string]any), store bot.Storage, api bot.BotAPI) *testEnv {
 	t.Helper()
+	return newTestEnvMem(t, llm, mutate, store, api, nil)
+}
+
+// newTestEnvMem 在 newTestEnvWith 之上于 Setup 后、Start 前注入记忆后端（nil 表示不注入）。
+func newTestEnvMem(t *testing.T, llm http.Handler, mutate func(map[string]any), store bot.Storage, api bot.BotAPI, mem memoryBackend) *testEnv {
+	t.Helper()
 	if llm == nil {
 		llm = llmJSON("打球可以啊")
 	}
@@ -386,6 +482,9 @@ func newTestEnvWith(t *testing.T, llm http.Handler, mutate func(map[string]any),
 	if err := p.Setup(ctx, reg); err != nil {
 		srv.Close()
 		t.Fatalf("Setup: %v", err)
+	}
+	if mem != nil {
+		p.mem = mem
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	if err := p.Start(runCtx); err != nil {

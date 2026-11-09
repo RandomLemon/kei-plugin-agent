@@ -307,7 +307,7 @@ func TestMCPSessionRecoveryDoesNotReplay(t *testing.T) {
 	env := newMCPEnv(t, s, &stubCompleter{})
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	result := env.p.toolsFor("default")[1].Call(ctx, `{"query":"q"}`)
+	result := env.p.toolsFor("default", nil)[1].Call(ctx, `{"query":"q"}`)
 	if result.Status != "error" || result.Detail != "http_404" {
 		t.Fatalf("原调用应失败: %+v", result)
 	}
@@ -421,13 +421,13 @@ func TestMCPDirectoryReload(t *testing.T) {
 		t.Fatal("未实际调用新增工具并发送回复")
 	}
 
-	old := env.p.toolsFor("default")
+	old := env.p.toolsFor("default", nil)
 	s.setDirectory([]mcpToolDef{testMCPDef("future"), changed}, true)
 	if got := env.command("tools", "reload"); got != "persona: 开始刷新 MCP 工具" {
 		t.Fatal(got)
 	}
 	waitMCPRefresh(t, env, 4)
-	if env.fake.texts()[3] != "persona: MCP 工具刷新失败：MCP 请求失败：http_500" || !reflect.DeepEqual(old, env.p.toolsFor("default")) {
+	if env.fake.texts()[3] != "persona: MCP 工具刷新失败：MCP 请求失败：http_500" || !reflect.DeepEqual(old, env.p.toolsFor("default", nil)) {
 		t.Fatal("分页失败未报告或覆盖了旧目录")
 	}
 
@@ -488,7 +488,7 @@ func TestMCPReloadSnapshotAndStop(t *testing.T) {
 	t.Run("刷新准入与关闭", func(t *testing.T) {
 		s := newMCPStub(t, false)
 		env := newMCPEnv(t, s, &stubCompleter{})
-		old := env.p.toolsFor("default")
+		old := env.p.toolsFor("default", nil)
 		s.mu.Lock()
 		s.defs = []mcpToolDef{testMCPDef("future")}
 		s.listEntered, s.listRelease, s.listCanceled = make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
@@ -520,7 +520,7 @@ func TestMCPReloadSnapshotAndStop(t *testing.T) {
 		if got := env.command("tools", "reload"); got != "persona: 插件正在关闭，无法刷新 MCP 工具" {
 			t.Fatal(got)
 		}
-		if !reflect.DeepEqual(old, env.p.toolsFor("default")) || env.fake.count() != 0 {
+		if !reflect.DeepEqual(old, env.p.toolsFor("default", nil)) || env.fake.count() != 0 {
 			t.Fatal("关闭后发布了目录或发送了完成通知")
 		}
 		if _, _, deletes := s.counts(); deletes != 1 {
@@ -685,7 +685,7 @@ func TestMCPStartLoadFailureAborts(t *testing.T) {
 	if p.ctx == nil || p.ctx.Err() == nil {
 		t.Fatal("启动失败应取消插件级 ctx")
 	}
-	if tools := p.toolsFor("default"); len(tools) != 0 {
+	if tools := p.toolsFor("default", nil); len(tools) != 0 {
 		t.Fatalf("失败时不应发布目录: %d", len(tools))
 	}
 	if _, _, deletes := s.counts(); deletes != 1 {

@@ -210,13 +210,13 @@ func TestRenderSystemPrompt(t *testing.T) {
 	env.p.cfg.personaTemplate = "A{{persona}}|B{{persona_name}}|C{{channel_name}}|D{{channel_id}}|E{{platform}}|F{{bot_name}}|G{{now}}|H{{last_sender}}|I{{max_chars}}|J{{skip_token}}|K{{unknown}}|L{{chat_kind}}"
 	const base = "A傲娇|Btsundere|C群g1|Dg1|Emock|Fbot1|G2026-09-26 12:00|H张三|I200|J[SKIP]|K{{unknown}}|L群聊"
 	// 寻址轮次：追加寻址版本轮要求块（不提供 skip 出口）。
-	got := env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), true)
+	got := env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), true, "")
 	want := base + "\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n"
 	if got != want {
 		t.Fatalf("renderSystemPrompt =\n%q\nwant\n%q", got, want)
 	}
 	// 随机轮次：追加允许输出哨兵的版本。
-	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false)
+	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false, "")
 	want = base + "\n# 本轮要求\n- 对方可能在聊别的话题；只有你觉得此刻接一句自然，才说话。\n" +
 		"- 决定不插话时，只输出 [SKIP]，不要输出其他任何内容。\n"
 	if got != want {
@@ -224,7 +224,7 @@ func TestRenderSystemPrompt(t *testing.T) {
 	}
 	// 关闭 llm_skip_enabled 后，随机轮次也要求必须回复，不提供哨兵出口。
 	env.p.cfg.llmSkipEnabled = false
-	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false)
+	got = env.p.renderSystemPrompt("tsundere", st, st.snapshotHistory(20), false, "")
 	want = base + "\n# 本轮要求\n- 无论对方在聊什么，你都必须回一句；不要输出 [SKIP]。\n"
 	if got != want {
 		t.Fatalf("renderSystemPrompt(random, skip disabled) =\n%q\nwant\n%q", got, want)
@@ -238,7 +238,7 @@ func TestRenderSystemPromptPrivate(t *testing.T) {
 	st.appendHistory(Turn{At: time.Now(), UserID: "u1", Name: "张三", Text: "在吗"})
 
 	env.p.cfg.personaTemplate = "A{{chat_kind}}|B{{channel_name}}|C{{channel_id}}|D{{platform}}|E{{bot_name}}|F{{last_sender}}"
-	got := env.p.renderSystemPrompt("default", st, st.snapshotHistory(20), true)
+	got := env.p.renderSystemPrompt("default", st, st.snapshotHistory(20), true, "")
 	want := "A私聊|B张三|C|Dmock|Ebot1|F张三" +
 		"\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n"
 	if got != want {
@@ -250,7 +250,7 @@ func TestRenderSystemPromptDefaultTemplate(t *testing.T) {
 	env := newTestEnv(t, nil, nil)
 	ev := groupEvent("g1", "u1", "张三", "hi")
 	st := env.waitLoaded(ev)
-	got := env.p.renderSystemPrompt("default", st, nil, false)
+	got := env.p.renderSystemPrompt("default", st, nil, false, "")
 	if !containsStr(got, "你正在一个群聊里聊天。") || !containsStr(got, "默认人格") {
 		t.Fatalf("默认模板渲染异常:\n%s", got)
 	}
@@ -261,7 +261,7 @@ func TestRenderSystemPromptDefaultTemplate(t *testing.T) {
 	if !containsStr(got, "\n# 本轮要求\n- 对方可能在聊别的话题") {
 		t.Fatalf("随机轮次缺少本轮要求块:\n%s", got)
 	}
-	got = env.p.renderSystemPrompt("default", st, nil, true)
+	got = env.p.renderSystemPrompt("default", st, nil, true, "")
 	if !containsStr(got, "\n# 本轮要求\n- 有人正在直接跟你说话，你必须回一句；不要输出 [SKIP]。\n") {
 		t.Fatalf("寻址轮次缺少必须回复块:\n%s", got)
 	}

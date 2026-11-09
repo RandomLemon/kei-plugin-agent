@@ -74,7 +74,7 @@ func (p *Plugin) personaDisplayName(name string) string {
 //
 // mustReply 为真表示本轮是寻址轮次（私聊、@/引用本机器人、命中 trigger_keywords）：
 // 提示词要求必须回一句，不提供 skip 出口（见 replyRule 与 docs/participation.md §7.5）。
-func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, history []Turn, mustReply bool) string {
+func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, history []Turn, mustReply bool, memBlock string) string {
 	pf := p.cfg.personas[personaName]
 	platform, botID, channelName, channelID, kind := st.info()
 	if channelName == "" {
@@ -105,7 +105,11 @@ func (p *Plugin) renderSystemPrompt(personaName string, st *channelState, histor
 	if tmpl == "" {
 		tmpl = defaultPersonaTemplate
 	}
-	return repl.Replace(tmpl) + replyRule(pf.SkipToken, mustReply, p.cfg.llmSkipEnabled)
+	base := repl.Replace(tmpl)
+	if memBlock != "" {
+		base = strings.TrimRight(base, "\r\n") + "\n\n" + memBlock + "\n"
+	}
+	return base + replyRule(pf.SkipToken, mustReply, p.cfg.llmSkipEnabled)
 }
 
 // turnName 返回历史的显示名：Name → UserID → "未知"。

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/RandomLemon/kei/pkg/bot"
+
+	"github.com/RandomLemon/kei-plugin-persona/internal/memory"
 )
 
 const (
@@ -66,6 +68,11 @@ type Plugin struct {
 	toolsMu   sync.RWMutex
 	tools     []tool // 当前 MCP 工具目录（mcp.md §13.3）
 	mcp       *mcpClient
+	// mem 为 nil 表示未启用记忆（memory_database_dsn 为空）。
+	mem memoryBackend
+	// memEpoch（Start 时刻 UnixNano）与 memSeq 组成无消息 ID 回复的本地事件 ID。
+	memEpoch int64
+	memSeq   atomic.Uint64
 
 	statSkips     atomic.Int64
 	statLLMErrors atomic.Int64
@@ -116,6 +123,9 @@ func (p *Plugin) setup(pc bot.PluginContext, reg bot.Registrar) error {
 	if cfg.mcpURL != "" {
 		p.mcp = newMCPClient(cfg, pc.HTTPClient)
 	}
+	if cfg.memory.DatabaseDSN != "" {
+		p.mem = memory.New(cfg.memory, log, pc.HTTPClient)
+	}
 
 	reg.OnEvent(bot.EventMessage, p.handleGroupMessage,
 		bot.WithKind(bot.MessageGroup), bot.WithPriority(0), bot.WithID("persona:group"))
@@ -151,6 +161,10 @@ func (p *Plugin) Start(ctx context.Context) error {
 			return err
 		}
 		p.replaceMCPTools(tools)
+	}
+	p.memEpoch = p.now().UnixNano()
+	if p.mem != nil {
+		p.mem.Start(p.ctx)
 	}
 	p.writeMu.Lock()
 	p.writeCond = sync.NewCond(&p.writeMu)
@@ -222,8 +236,8 @@ func (p *Plugin) persist(op string, fn func(ctx context.Context) error, attrs ..
 	p.writeMu.Unlock()
 }
 
-// Stop 标记关闭、排空写队列，再取消插件级 ctx、停掉全部批处理并等待后台
-// 协程退出；幂等。
+// Stop 标记关闭、排空写队列并停止记忆，再取消插件级 ctx、停掉全部批处理并
+// 等待后台协程退出；幂等。
 func (p *Plugin) Stop(ctx context.Context) error {
 	// 先拒绝新写入并让单写协程把队列排空，再取消 p.ctx：写穿透的 ctx 派生自
 	// p.ctx，先取消会让持久化后端上的最后一次写入被丢弃（见 persist）。每次
@@ -237,6 +251,10 @@ func (p *Plugin) Stop(ctx context.Context) error {
 	p.writeMu.Unlock()
 	if writerDone != nil {
 		<-writerDone
+	}
+	// 记忆 flush 需要尚未取消的插件级 ctx，故在 p.cancel 之前停止。
+	if p.mem != nil {
+		p.mem.Stop(ctx)
 	}
 
 	if p.cancel != nil {

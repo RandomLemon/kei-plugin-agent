@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/RandomLemon/kei/pkg/bot"
+
+	"github.com/RandomLemon/kei-plugin-persona/internal/memory"
 )
 
 const (
@@ -125,6 +127,9 @@ type config struct {
 
 	limitsMaxConcurrent int
 	debugPrompts        bool
+
+	memoryToolsEnabled bool
+	memory             memory.Config // DatabaseDSN 为空表示未启用记忆
 }
 
 // loadConfig 读取全部键、填默认值并校验。
@@ -178,6 +183,10 @@ func loadConfig(c *bot.Config) (*config, error) {
 		return nil, cfgErr("mcp_timeout", cfg.mcpTimeout.String(), "必须 > 0")
 	}
 	if cfg.mcpExtraHeaders, err = readMCPHeaders(c); err != nil {
+		return nil, err
+	}
+	cfg.memoryToolsEnabled = r.boolean("memory_tools_enabled", false)
+	if cfg.memory, err = readMemoryConfig(r, cfg); err != nil {
 		return nil, err
 	}
 	if cfg.personas, err = readPersonas(c, cfg); err != nil {
@@ -347,7 +356,112 @@ func loadConfig(c *bot.Config) (*config, error) {
 		return nil, cfgErr("random_timezone", r.str("random_timezone", "Local"), "不是合法时区")
 	}
 	cfg.randomTimezone = loc
+
+	cfg.memory.Location = loc
 	return cfg, nil
+}
+
+// readMemoryConfig 读取并校验 memory_* 键（Location 由调用方填）。
+func readMemoryConfig(r cfgReader, cfg *config) (memory.Config, error) {
+	m := memory.Config{
+		DatabaseDSN:    r.str("memory_database_dsn", ""),
+		IngestInterval: r.dur("memory_ingest_interval", 5*time.Second),
+		DailyAt:        r.str("memory_daily_at", "04:00"),
+		ContextTimeout: 1500 * time.Millisecond, ContextMaxChars: 1200,
+		MessageRetentionDays: 60, SummaryRetentionDays: 90,
+	}
+	var err error
+	if m.MaxOpenConns, err = r.intKey("memory_db_max_open_conns", 8, "必须 >= 1"); err != nil {
+		return m, err
+	}
+	if m.IngestBatch, err = r.intKey("memory_ingest_batch", 50, "必须 >= 1"); err != nil {
+		return m, err
+	}
+	if m.QueueSize, err = r.intKey("memory_queue_size", 2048, "必须 >= 1"); err != nil {
+		return m, err
+	}
+	if m.IngestInterval <= 0 {
+		return m, cfgErr("memory_ingest_interval", m.IngestInterval.String(), "必须 > 0")
+	}
+	if err := needMinInt("memory_db_max_open_conns", m.MaxOpenConns, 1); err != nil {
+		return m, err
+	}
+	if err := needMinInt("memory_ingest_batch", m.IngestBatch, 1); err != nil {
+		return m, err
+	}
+	if err := needMinInt("memory_queue_size", m.QueueSize, 1); err != nil {
+		return m, err
+	}
+	if m.IngestBatch > m.QueueSize {
+		return m, cfgErr("memory_ingest_batch", strconv.Itoa(m.IngestBatch), "不能大于 memory_queue_size")
+	}
+	if m.DatabaseDSN == "" {
+		return m, nil
+	}
+	if len(m.DailyAt) != 5 {
+		return m, cfgErr("memory_daily_at", m.DailyAt, "必须是 HH:MM")
+	}
+	if _, err := time.Parse("15:04", m.DailyAt); err != nil {
+		return m, cfgErr("memory_daily_at", m.DailyAt, "必须是 HH:MM")
+	}
+	for _, item := range []struct {
+		key string
+		dst *int
+		def int
+	}{{"memory_message_retention_days", &m.MessageRetentionDays, 60}, {"memory_summary_retention_days", &m.SummaryRetentionDays, 90}} {
+		if *item.dst, err = r.intKey(item.key, item.def, "必须 >= 1"); err != nil {
+			return m, err
+		}
+		if err = needMinInt(item.key, *item.dst, 1); err != nil {
+			return m, err
+		}
+	}
+	m.LLMBaseURL = r.str("memory_llm_base_url", "")
+	inherited := m.LLMBaseURL == ""
+	if inherited {
+		m.LLMBaseURL = cfg.llmBaseURL
+		m.LLMAPIKey = cfg.llmAPIKey
+		m.LLMHeaders = cfg.llmExtraHeaders
+	}
+	if _, ok := r.c.Get("memory_llm_api_key"); ok {
+		m.LLMAPIKey = r.str("memory_llm_api_key", "")
+	}
+	if raw, ok := r.c.Get("memory_llm_extra_headers"); ok {
+		m.LLMHeaders = map[string]string{}
+		if values, ok := asStringMap(raw); ok {
+			for k, v := range values {
+				m.LLMHeaders[k] = strOf(v)
+			}
+		}
+	}
+	m.LLMModelSmall = r.str("memory_llm_model_small", "")
+	if m.LLMModelSmall == "" {
+		m.LLMModelSmall = cfg.llmModel
+	}
+	m.LLMModelLarge = r.str("memory_llm_model_large", "")
+	if m.LLMModelLarge == "" {
+		m.LLMModelLarge = m.LLMModelSmall
+	}
+	m.LLMTimeout = r.dur("memory_llm_timeout", 120*time.Second)
+	m.LLMJSONMode = r.boolean("memory_llm_json_mode", true)
+	u, parseErr := url.Parse(m.LLMBaseURL)
+	if parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return m, cfgErr("memory_llm_base_url", "", "必须是带 host 的 http(s) URL")
+	}
+	if m.LLMTimeout <= 0 {
+		return m, cfgErr("memory_llm_timeout", m.LLMTimeout.String(), "必须 > 0")
+	}
+	m.ContextTimeout = r.dur("memory_context_timeout", 1500*time.Millisecond)
+	if m.ContextTimeout <= 0 {
+		return m, cfgErr("memory_context_timeout", m.ContextTimeout.String(), "必须 > 0")
+	}
+	if m.ContextMaxChars, err = r.intKey("memory_context_max_chars", 1200, "必须 >= 1"); err != nil {
+		return m, err
+	}
+	if err = needMinInt("memory_context_max_chars", m.ContextMaxChars, 1); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 // readPersonas 解析 personas，并回落各字段默认值。
@@ -393,6 +507,15 @@ func readPersonas(c *bot.Config, cfg *config) (map[string]personaConfig, error) 
 			if rawTools, ok := t["tools"]; ok && rawTools != nil { // 写成 null 与不写一样：继承
 				p.Tools, p.hasTools = stringList(rawTools), true
 				for _, toolName := range p.Tools {
+					if strings.HasPrefix(toolName, "memory__") {
+						if toolName != memorySummaryName {
+							return nil, cfgErr("personas."+name+".tools", toolName, "不是合法记忆工具名")
+						}
+						if cfg.memory.DatabaseDSN == "" || !cfg.memoryToolsEnabled {
+							return nil, cfgErr("personas."+name+".tools", toolName, "未启用记忆工具")
+						}
+						continue
+					}
 					if !validMCPToolName(toolName) {
 						return nil, cfgErr("personas."+name+".tools", toolName, "不是合法 MCP 工具名")
 					}

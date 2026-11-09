@@ -12,7 +12,7 @@ import (
 )
 
 func personaUsage() string {
-	return "用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]"
+	return "用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload] | memory status"
 }
 
 // handleCommand 处理 /agent 管理命令。
@@ -20,9 +20,15 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 	if ev.Command == nil {
 		return nil
 	}
-	// 工具命令不需要会话状态，尤其不能在关闭后触发新的懒加载任务。
+	// 工具与记忆命令不需要会话状态，尤其不能在关闭后触发新的懒加载任务。
 	if args := ev.Command.Args; len(args) > 0 && args[0] == "tools" {
 		return p.handleToolsCommand(ctx, bot.TargetFromEvent(ev), r, args[1:])
+	}
+	if args := ev.Command.Args; len(args) > 0 && args[0] == "memory" {
+		if len(args) != 2 || args[1] != "status" {
+			return r.Text(personaUsage()).Send(ctx)
+		}
+		return r.Text(p.memoryStatus()).Send(ctx)
 	}
 	st := p.acquireState(ev)
 	st.touch(p.now())
@@ -102,6 +108,16 @@ func (p *Plugin) handleCommand(ctx context.Context, ev *bot.Event, r bot.Reply) 
 	}
 }
 
+// memoryStatus 渲染 /agent memory status：只读计数快照，不访问数据库。
+func (p *Plugin) memoryStatus() string {
+	if p.mem == nil {
+		return "记忆：未启用"
+	}
+	s := p.mem.Stats()
+	return fmt.Sprintf("记忆：已启用 数据库=%s\n写入：已写入 %d 重复 %d 丢弃 %d 失败批次 %d 队列 %d/%d\n任务：待执行 %d 执行中 %d 失败 %d",
+		s.State, s.Written, s.Duplicates, s.Dropped, s.FailedBatches, s.QueueLen, s.QueueCap, s.JobsPending, s.JobsRunning, s.JobsDead)
+}
+
 func (p *Plugin) handleToolsCommand(ctx context.Context, target bot.Target, r bot.Reply, args []string) error {
 	if len(args) == 0 {
 		p.toolsMu.RLock()
@@ -110,6 +126,9 @@ func (p *Plugin) handleToolsCommand(ctx context.Context, target bot.Target, r bo
 			names[i] = t.Def().Function.Name
 		}
 		p.toolsMu.RUnlock()
+		if p.mem != nil && p.cfg.memoryToolsEnabled {
+			names = append(names, memorySummaryName)
+		}
 		return r.Text("persona: tools=[" + strings.Join(names, " ") + "]").Send(ctx)
 	}
 	if len(args) != 1 || args[0] != "reload" {

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/RandomLemon/kei/pkg/bot"
+
+	"github.com/RandomLemon/kei-plugin-persona/internal/memory"
 )
 
 // TestStageCtxCancelDoesNotKillRuntime 回归 kei 的生命周期语义：传进 Start 的 ctx 是
@@ -255,5 +257,44 @@ func TestWriteThroughSerialized(t *testing.T) {
 	store.mu.Unlock()
 	if err != nil {
 		t.Fatalf("第一次写入被错误取消: %v", err)
+	}
+}
+
+func TestMemoryDisabledWithoutDSN(t *testing.T) {
+	e := newTestEnv(t, nil, nil)
+	if e.p.mem != nil {
+		t.Fatalf("DSN 为空时不应构造记忆, got %T", e.p.mem)
+	}
+}
+
+func TestMemoryConstructedWithDSN(t *testing.T) {
+	e := newTestEnv(t, nil, func(c map[string]any) {
+		c["memory_database_dsn"] = "postgres://u:p@127.0.0.1:1/db?sslmode=disable"
+	})
+	if _, ok := e.p.mem.(*memory.Service); !ok {
+		t.Fatalf("配置 DSN 后应构造 *memory.Service, got %T", e.p.mem)
+	}
+	if got := e.p.mem.Stats().State; got != memory.StateConnecting {
+		t.Fatalf("State = %q, want %q", got, memory.StateConnecting)
+	}
+}
+
+// TestMemoryStopBeforeCancel 回归：记忆 flush 需要尚未取消的插件级 ctx，Stop 必须先停记忆再 p.cancel。
+func TestMemoryStopBeforeCancel(t *testing.T) {
+	mem := &fakeMemory{}
+	e := newTestEnvMem(t, nil, nil, nil, nil, mem)
+	if !mem.started {
+		t.Fatal("Start 后记忆应已启动")
+	}
+	var ctxErr error
+	mem.onStop = func() { ctxErr = e.p.ctx.Err() }
+	if err := e.p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !mem.stopped {
+		t.Fatal("Stop 应停止记忆")
+	}
+	if ctxErr != nil {
+		t.Fatalf("停止记忆时插件级 ctx 已取消: %v", ctxErr)
 	}
 }

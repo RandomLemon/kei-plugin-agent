@@ -1,0 +1,50 @@
+# devhost 联调配置（提交到仓库，不写密钥与本机地址）。
+#
+# 本机特有的值与密钥全部经 .env 用 KEI_* 环境变量覆盖，模板见 .env.example；
+# 覆盖规则见 kei docs/configuration.md §12.7。配置键含义见 docs/configuration.md 第 10 章。
+
+log:
+  level: info
+
+# kei 自身的键值存储（/agent 运行时覆盖等）。memory 重启即丢；
+# 记忆子系统用的是下方 persona.memory_database_dsn，与此无关。
+storage:
+  type: memory
+
+# 管理员经 KEI_AUTH_ADMIN_USERS 注入；同时启用多个平台时必须写 platform:user_id。
+auth:
+  admin_users: []
+
+bots:
+  # 本地注入测试：curl -XPOST 127.0.0.1:18080/inject -d '{"text":"bot 在吗","user_id":"u1","channel_id":"g1"}'，
+  # 见 docs/testing.md §11.3 / §11.5。
+  - name: mock-main
+    adapter: mock
+    platform: mock
+    listen_addr: 127.0.0.1:18080
+
+  # 真实 QQ：本进程主动连接 SnowLuma 的 OneBot 正向 WebSocket 服务端，断线自动重连。
+  # 缺省关闭；在 .env 里填 ws_url / access_token 并设 KEI_BOTS_QQ_MAIN_ENABLED=true 启用。
+  - name: qq-main
+    adapter: onebot
+    enabled: false
+    mode: forward_ws
+    ws_url: ""
+    access_token: ""
+
+plugins:
+  persona:
+    enabled: true
+
+    personas:
+      default: "普通的群友：说话随意、口语、短。"
+    default_persona: default
+
+    # 真实群里只在白名单群说话，群号经 KEI_PLUGINS_PERSONA_GROUP_LIST 注入。
+    group_policy: whitelist
+    group_list: []
+    private_policy: "off"
+
+    # llm_base_url / llm_api_key / llm_model 与记忆库 DSN 经 .env 注入；
+    # memory_database_dsn 为空时关闭记忆功能。
+    memory_database_dsn: ""

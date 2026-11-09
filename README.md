@@ -103,7 +103,7 @@ plugins:
 
 ## 文档
 
-`docs/` 是目标实现口径的唯一来源；文档索引（唯一一份，含章号与阅读顺序）见 [`docs/README.md`](docs/README.md) §1-§2。
+`docs/` 是目标实现口径的唯一来源；文档索引（含章号与阅读顺序）见 [`docs/README.md`](docs/README.md) §1-§2，记忆系统文档索引见 [`docs/memory/overview.md`](docs/memory/overview.md) 开头。
 
 ## License
 

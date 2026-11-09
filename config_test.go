@@ -2,7 +2,9 @@ package persona
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,7 +63,13 @@ func TestLoadConfigDefaults(t *testing.T) {
 		{"tools_call_timeout", cfg.toolsCallTimeout, 8 * time.Second},
 		{"tools_result_max_chars", cfg.toolsResultMaxChars, 2000},
 		{"mcp_url", cfg.mcpURL, ""},
+		{"memory_tools_enabled", cfg.memoryToolsEnabled, false},
 		{"mcp_timeout", cfg.mcpTimeout, 8 * time.Second},
+		{"memory_database_dsn", cfg.memory.DatabaseDSN, ""},
+		{"memory_db_max_open_conns", cfg.memory.MaxOpenConns, 8},
+		{"memory_ingest_batch", cfg.memory.IngestBatch, 50},
+		{"memory_ingest_interval", cfg.memory.IngestInterval, 5 * time.Second},
+		{"memory_queue_size", cfg.memory.QueueSize, 2048},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -83,6 +91,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.randomTimezone == nil {
 		t.Error("randomTimezone 未解析")
+	}
+	if cfg.memory.Location != cfg.randomTimezone {
+		t.Error("memory.Location 应取自 random_timezone")
 	}
 }
 
@@ -231,6 +242,18 @@ func TestLoadConfigErrors(t *testing.T) {
 			"persona: 配置错误 tools_call_timeout=-1s: 必须 > 0"},
 		{"tools_call_timeout 为零", func(c map[string]any) { c["tools_call_timeout"] = "0s" },
 			"persona: 配置错误 tools_call_timeout=0s: 必须 > 0"},
+		{"memory_ingest_interval 为零", func(c map[string]any) { c["memory_ingest_interval"] = "0s" },
+			"persona: 配置错误 memory_ingest_interval=0s: 必须 > 0"},
+		{"memory_db_max_open_conns 为零", func(c map[string]any) { c["memory_db_max_open_conns"] = 0 },
+			"persona: 配置错误 memory_db_max_open_conns=0: 必须 >= 1"},
+		{"memory_ingest_batch 为零", func(c map[string]any) { c["memory_ingest_batch"] = 0 },
+			"persona: 配置错误 memory_ingest_batch=0: 必须 >= 1"},
+		{"memory_queue_size 为零", func(c map[string]any) { c["memory_queue_size"] = 0 },
+			"persona: 配置错误 memory_queue_size=0: 必须 >= 1"},
+		{"memory_ingest_batch 大于队列", func(c map[string]any) {
+			c["memory_ingest_batch"] = 100
+			c["memory_queue_size"] = 10
+		}, "persona: 配置错误 memory_ingest_batch=100: 不能大于 memory_queue_size"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -300,5 +323,132 @@ func TestSetupRequiresPluginContext(t *testing.T) {
 	p := &Plugin{}
 	if err := p.Setup(context.Background(), &fakeRegistrar{}); err == nil {
 		t.Fatal("缺少 PluginContext 应报错")
+	}
+}
+
+func TestMemorySchedulingConfig(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		value  any
+		reason string
+	}{
+		{"memory_daily_at", "4:00", "必须是 HH:MM"}, {"memory_daily_at", "24:00", "必须是 HH:MM"},
+		{"memory_message_retention_days", 0, "必须 >= 1"}, {"memory_summary_retention_days", 0, "必须 >= 1"},
+	} {
+		t.Run(tc.key+fmt.Sprint(tc.value), func(t *testing.T) {
+			c := baseConfigMap("http://x")
+			c["memory_database_dsn"] = "test"
+			c[tc.key] = tc.value
+			_, err := loadConfig(bot.NewConfig(c))
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestDisabledMemoryIgnoresSchedulingConfig(t *testing.T) {
+	c := baseConfigMap("http://x")
+	c["memory_daily_at"] = "bad"
+	c["memory_message_retention_days"] = 0
+	c["memory_summary_retention_days"] = 0
+	if _, err := loadConfig(bot.NewConfig(c)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryLLMFallback(t *testing.T) {
+	for _, endpoint := range []string{"", "http://other/v1"} {
+		c := baseConfigMap("http://main/v1")
+		c["memory_database_dsn"] = "test"
+		c["llm_extra_headers"] = map[string]any{"X-Test": "main"}
+		c["memory_llm_base_url"] = endpoint
+		cfg, err := loadConfig(bot.NewConfig(c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.memory.LLMTimeout != 120*time.Second || cfg.memory.LLMModelSmall != cfg.llmModel || cfg.memory.LLMModelLarge != cfg.llmModel {
+			t.Fatal("模型或超时回落错误")
+		}
+		if endpoint == "" {
+			if cfg.memory.LLMAPIKey != cfg.llmAPIKey || cfg.memory.LLMHeaders["X-Test"] != "main" {
+				t.Fatal("未继承主端点凭据")
+			}
+		} else if cfg.memory.LLMAPIKey != "" || len(cfg.memory.LLMHeaders) != 0 {
+			t.Fatal("凭据跨端点继承")
+		}
+		c["memory_llm_api_key"] = "explicit"
+		c["memory_llm_extra_headers"] = map[string]any{"X-Test": "explicit"}
+		c["memory_llm_model_small"] = "s"
+		cfg, err = loadConfig(bot.NewConfig(c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.memory.LLMAPIKey != "explicit" || cfg.memory.LLMHeaders["X-Test"] != "explicit" || cfg.memory.LLMModelLarge != "s" {
+			t.Fatal("显式值未生效")
+		}
+	}
+	for _, tc := range []struct{ key, value, reason string }{{"memory_llm_base_url", "bad", "必须是带 host 的 http(s) URL"}, {"memory_llm_timeout", "0s", "必须 > 0"}} {
+		c := baseConfigMap("http://main")
+		c["memory_database_dsn"] = "test"
+		c[tc.key] = tc.value
+		_, err := loadConfig(bot.NewConfig(c))
+		if err == nil || !strings.Contains(err.Error(), tc.reason) {
+			t.Fatalf("err=%v", err)
+		}
+	}
+}
+
+func TestMemoryContextConfig(t *testing.T) {
+	for _, tc := range []struct {
+		key    string
+		value  any
+		reason string
+	}{{"memory_context_timeout", "0s", "必须 > 0"}, {"memory_context_max_chars", 0, "必须 >= 1"}, {"memory_context_max_chars", "invalid", "必须 >= 1"}} {
+		c := baseConfigMap("http://x")
+		c["memory_database_dsn"] = "test"
+		c[tc.key] = tc.value
+		_, err := loadConfig(bot.NewConfig(c))
+		if err == nil || !strings.Contains(err.Error(), tc.reason) {
+			t.Fatalf("%s: %v", tc.key, err)
+		}
+		delete(c, "memory_database_dsn")
+		if _, err = loadConfig(bot.NewConfig(c)); err != nil {
+			t.Fatalf("未启用记忆时校验了上下文配置：%v", err)
+		}
+	}
+	c := baseConfigMap("http://x")
+	c["memory_database_dsn"] = "test"
+	cfg, err := loadConfig(bot.NewConfig(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.memory.ContextTimeout != 1500*time.Millisecond || cfg.memory.ContextMaxChars != 1200 {
+		t.Fatal("上下文默认值错误")
+	}
+}
+
+func TestMemoryToolConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, dsn string
+		enabled         bool
+		want            string
+	}{
+		{name: "unknown", tool: "memory__other", dsn: "postgres://test", enabled: true, want: "不是合法记忆工具名"},
+		{name: "disabled", tool: "memory__summary", dsn: "postgres://test", want: "未启用记忆工具"},
+		{name: "no_memory", tool: "memory__summary", enabled: true, want: "未启用记忆工具"},
+		{name: "enabled", tool: "memory__summary", dsn: "postgres://test", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfig(bot.NewConfig(map[string]any{"llm_model": "m", "memory_database_dsn": tc.dsn, "memory_tools_enabled": tc.enabled, "personas": map[string]any{"default": map[string]any{"prompt": "p", "tools": []any{tc.tool}}}}))
+			if tc.want != "" {
+				want := "persona: 配置错误 personas.default.tools=" + tc.tool + ": " + tc.want
+				if err == nil || err.Error() != want {
+					t.Fatalf("%v want %s", err, want)
+				}
+			} else if err != nil || !cfg.memoryToolsEnabled {
+				t.Fatalf("%+v %v", cfg, err)
+			}
+		})
 	}
 }

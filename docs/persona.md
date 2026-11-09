@@ -101,6 +101,7 @@ reg.OnCommand("agent", p.handleCommand,
 | `list <group\|private> add\|del <id>` | 追加/移除名单项 → 写穿透持久化 |
 | `tools` | 只读本地目录，显示全部工具名称（[`mcp.md`](mcp.md) §14.6） |
 | `tools reload` | 后台刷新 MCP 工具目录；Handler 立即回复，完成后另发结果（[`mcp.md`](mcp.md) §14.6） |
+| `memory status` | 只读记忆子系统的计数快照，不访问数据库、不建会话状态（见下） |
 | 未知子命令 | 回用法文本 |
 
 命令的即时回复用注入的 `Reply`（核心会自动在回复首位加引用触发消息的 `SegReply` 段，支持引用的平台因此显示为「回复某条消息」；`bot.NewNoopReply` 不加引用，测试里断言的是纯文本）。命令**不做 LLM 调用、不进历史**。`tools reload` 的后续结果由插件级 ctx 驱动的后台任务通过 `BotAPI.Send` 发送，不能使用已返回 Handler 的 ctx/Reply。
@@ -108,7 +109,7 @@ reg.OnCommand("agent", p.handleCommand,
 用法文本（逐字）：
 
 ```text
-用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload]
+用法: /agent status | persona [name] | on | off | reset | policy [group|private mode] | list [group|private [add|del id]] | tools [reload] | memory status
 ```
 
 `policy`/`list` 的输出行（逐字，语义与空名单行为见 [`participation.md`](participation.md) §7.8）：
@@ -137,6 +138,18 @@ reg.OnCommand("agent", p.handleCommand,
 ```
 
 目录为空时输出 `persona: tools=[]`；`N` 是本次发布的工具总数，全部来自 MCP。只有 reload 成功发布目录后才发送成功通知，失败原因不得包含凭据或 session ID；语法非法仍回用法文本。
+
+`memory status` 的输出（逐字，`<…>` 为取值；设计见 [`memory/summary-layer/summary-layer.md`](memory/summary-layer/summary-layer.md) §16.3.4）：
+
+```text
+记忆：已启用 数据库=<连接中|就绪|迁移失败|已停止>
+写入：已写入 <written> 重复 <duplicates> 丢弃 <dropped> 失败批次 <failedBatches> 队列 <len>/<cap>
+任务：待执行 <pending> 执行中 <running> 失败 <dead>
+```
+
+任务计数每 60s 刷新一次。
+
+`memory_database_dsn` 为空时只输出 `记忆：未启用`；`memory` 后缺参或参数非法回用法文本。
 
 **`/agent status` 输出（字段顺序固定，`·` 分隔，逐字）**：
 
@@ -181,9 +194,21 @@ persona: persona=tsundere 来源=override · 预设=[default tsundere]
 - `{{now}}` 用 `random_timezone` 解析出的时区。
 - 渲染结果末尾追加**本轮要求块**（见下）。块内的哨兵是**字面量**而非占位符，不做二次替换；默认模板不再自带「接话时机 / 不插话输出哨兵」两条，这两条统一由本轮要求块给出，`{{skip_token}}` 占位符仍对自定义模板有效。
 
+**记忆块**（S5，逐字格式；数据选取见 [`memory/summary-layer/summary-layer.md`](memory/summary-layer/summary-layer.md) §16.3.7）
+
+```text
+# 记忆（仅供参考，可能过时；与当前对话冲突时以当前对话为准）
+[近期重点]
+- [11-03 概况] ……
+- [11-03] 标题：摘要（未决：……）
+- [11-02] 标题：一句话
+```
+
+只读取当前会话最近三天的日摘要；按重要性、时间衰减与关键词相关度选择，正文在 `memory_context_max_chars` 预算内。无内容或读取失败时不输出记忆块；本轮要求块始终在最后。读取在异步生成路径内，默认 `1500ms` 超时，随机轮次同样读取。
+
 **本轮要求块（追加在渲染结果末尾，模板不可覆盖）**
 
-`system` 的最终内容 = `persona_template` 渲染结果 + 本轮要求块，两者之间空一行。块由插件按轮次与 `llm_skip_enabled` 生成：**寻址轮次**（私聊 / @ 本机器人 / 引用本机器人 / 命中 `trigger_keywords`，轮次判定见 [`participation.md`](participation.md) §7.5）无论开关如何都不向模型提供 skip 出口，必须回一句；**随机轮次**仅在 `llm_skip_enabled=true`（默认）时允许输出哨兵，关闭时同样必须回一句。模板自带的同类写法（如「决定不插话时，只输出 `{{skip_token}}`」）与块冲突时**以块为准**。
+`system` 的最终内容 = `persona_template` 渲染结果 + 记忆块（有内容时）+ 本轮要求块，各块之间空一行。没有记忆时保持原有渲染结果逐字不变。块由插件按轮次与 `llm_skip_enabled` 生成：**寻址轮次**（私聊 / @ 本机器人 / 引用本机器人 / 命中 `trigger_keywords`，轮次判定见 [`participation.md`](participation.md) §7.5）无论开关如何都不向模型提供 skip 出口，必须回一句；**随机轮次**仅在 `llm_skip_enabled=true`（默认）时允许输出哨兵，关闭时同样必须回一句。模板自带的同类写法（如「决定不插话时，只输出 `{{skip_token}}`」）与块冲突时**以块为准**。
 
 三种取值的逐字文本（`<skip>` = 当前人格生效的 skip 哨兵；块以 `\n` 开头、以 `\n` 结尾）：
 

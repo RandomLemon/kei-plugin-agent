@@ -4,7 +4,9 @@
 
 ## 12.1 现状
 
-**P1-P9 已落地。** MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。管理员通过 `/agent tools` 查看本地目录、`/agent tools reload` 后台刷新；完整加载成功后整体替换，失败保留旧目录，当前生成保持定义与实现快照。端点和凭据修改仍需重启。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`）。
+**P1-P9 已落地。** 除内置记忆工具外，MCP 是唯一工具来源，内置注册、RAG 实现与专用配置已删除。当前在 Start 加载单端点工具，支持 JSON/SSE、分页、会话恢复（不重放失败调用）和 Stop 清理；未配置 MCP 时正常聊天。管理员通过 `/agent tools` 查看本地目录、`/agent tools reload` 后台刷新；完整加载成功后整体替换，失败保留旧目录，当前生成保持定义与实现快照。端点和凭据修改仍需重启。设计见 [`mcp.md`](mcp.md) 第 14 章，逐阶段验收见 [§14.10](mcp.md#1410-分阶段实现规划)。仓库包含 `AGENTS.md`、`docs/`、`LICENSE`，以及根包 `persona` 的实现（`register.go`、`plugin.go`、`config.go`、`persona.go`、`decision.go`、`state.go`、`llm.go`、`commands.go`、`policy.go`、`tools.go`、`mcp.go`、`vision.go`、`memory.go`、`memory_tools.go`）与测试（`config_test.go`、`decision_test.go`、`llm_test.go`、`tools_test.go`、`mcp_test.go`、`persona_test.go`、`policy_test.go`、`plugin_test.go`、`helpers_test.go`、`e2e_test.go`、`vision_test.go`、`memory_test.go`、`memory_tools_test.go`），以及记忆子系统 `internal/memory` 与本地联调宿主 `cmd/devhost`（目录见 [`architecture.md`](architecture.md) 第 5 章）。
+
+**记忆系统分阶段实现中。** 实现进度只在 [`memory/progress.md`](memory/progress.md) 记录（摘要层 S1–S7 的细分进度见 [`memory/summary-layer/progress.md`](memory/summary-layer/progress.md)），本节不再重复。总体方案见 [`memory/overview.md`](memory/overview.md) 第 15 章，摘要层（M1 采集 + M2 摘要）实现方案见 [`memory/summary-layer/summary-layer.md`](memory/summary-layer/summary-layer.md) 第 16 章。
 
 `docs/` 是**验收基线**：实现必须与文档一致。配置键、提示词模板、决策参数、日志字段与 `/agent` 输出行都是逐字约定（范围与变更流程见 [`README.md`](README.md) 顶部与 §3）。
 

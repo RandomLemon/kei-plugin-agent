@@ -52,6 +52,9 @@ func (p *Plugin) handleChat(ctx context.Context, ev *bot.Event, r bot.Reply) err
 	defer st.endHandle()
 	if ev.Command == nil {
 		st.appendHistory(p.userTurn(ev, text, parts))
+		if p.mem != nil {
+			p.mem.Enqueue(p.memoryRecordFromEvent(ev, text))
+		}
 	}
 	// 懒加载未完成：暂存本条（有界单槽），加载完成后由 restoreState 补判，
 	// 保证新会话的第一条消息不被静默丢弃；加载期间到达的更新消息会覆盖单槽。
@@ -396,9 +399,10 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn, round 
 	mustReply := pendingKind == "addressed"
 
 	trimmed := p.trimHistory(history)
+	memBlock := p.memoryContext(st, trimmed)
 	slots := p.fetchVisionSlots(p.ctx, p.selectVisionSlots(trimmed))
 	req := completionRequest{
-		System:      p.renderSystemPrompt(personaName, st, history, mustReply),
+		System:      p.renderSystemPrompt(personaName, st, history, mustReply, memBlock),
 		User:        p.renderUserContent(chatKind, trimmed, slots),
 		Temperature: pf.Temperature,
 		MaxTokens:   pf.MaxTokens,
@@ -436,9 +440,13 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn, round 
 	mention := p.cfg.replyMentionSender && round.addressed && chatKind == bot.MessageGroup
 	st.mu.Unlock()
 
+	mentioned := ""
+	if mention {
+		mentioned = sender
+	}
 	segs := make([]bot.Segment, 0, 2)
-	if mention && sender != "" {
-		segs = append(segs, message.At(sender))
+	if mentioned != "" {
+		segs = append(segs, message.At(mentioned))
 	}
 	segs = append(segs, message.Text(reply))
 
@@ -468,6 +476,9 @@ func (p *Plugin) generate(st *channelState, epoch uint64, history []Turn, round 
 	st.mu.Unlock()
 	if res != nil {
 		p.replyIDs.Add(res.MessageID)
+	}
+	if p.mem != nil {
+		p.mem.Enqueue(p.memoryRecordFromReply(target, personaName, reply, mentioned, res, now))
 	}
 	p.log.Debug("persona 决策", "decision", "reply", "kind", pendingKind, "channel", st.key)
 }

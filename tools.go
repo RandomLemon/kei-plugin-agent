@@ -31,15 +31,19 @@ type toolResult struct {
 }
 
 // toolsFor 返回人格可用的工具：不写 tools 时继承全部已装配工具，否则按名单过滤，保持装配顺序。
-func (p *Plugin) toolsFor(personaName string) []tool {
+func (p *Plugin) toolsFor(personaName string, st *channelState) []tool {
 	p.toolsMu.RLock()
-	defer p.toolsMu.RUnlock()
+	tools := slices.Clone(p.tools)
+	p.toolsMu.RUnlock()
+	if p.mem != nil && p.cfg.memoryToolsEnabled {
+		tools = append(tools, memorySummaryTool{backend: p.mem, scene: memoryScene(st)})
+	}
 	pf := p.cfg.personas[personaName]
 	if !pf.hasTools {
-		return append([]tool(nil), p.tools...)
+		return tools
 	}
 	var out []tool
-	for _, t := range p.tools {
+	for _, t := range tools {
 		if slices.Contains(pf.Tools, t.Def().Function.Name) {
 			out = append(out, t)
 		}
@@ -57,7 +61,7 @@ func (p *Plugin) replaceMCPTools(remote []tool) {
 // completeWithTools 执行一轮生成：人格无可用工具时只调一次 Complete；
 // 否则按 mcp.md §13.4 循环执行工具调用，直到模型给出文本或轮数用尽。
 func (p *Plugin) completeWithTools(st *channelState, epoch uint64, personaName string, req completionRequest) (string, error) {
-	tools := p.toolsFor(personaName)
+	tools := p.toolsFor(personaName, st)
 	if len(tools) == 0 {
 		res, err := p.completer.Complete(p.ctx, req)
 		return res.Content, err

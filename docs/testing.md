@@ -1,6 +1,6 @@
 # testing.md — 质量与测试（第 11 章）
 
-本文覆盖第 11 章：质量门、单元测试矩阵与注入缝、mock 适配器端到端联调、竞态与优雅关闭。完成定义：质量门全绿 + §11.2 矩阵全过 + §11.3 端到端可复现。
+本文覆盖第 11 章：质量门、单元测试矩阵与注入缝、mock 适配器端到端联调、竞态与优雅关闭、本地联调宿主。完成定义：质量门全绿 + §11.2 矩阵全过 + §11.3 端到端可复现。
 
 ## 11.1 质量门
 
@@ -18,6 +18,88 @@ go test -race ./...
 
 `go test -race ./...` 是**必过项**：本插件大量使用定时器与并发状态，竞态检测不可省。
 
+**记忆子系统的数据库测试**：`internal/memory` 下需要数据库的测试读环境变量 `PERSONA_MEMORY_TEST_DSN`，未设置时 `t.Skip`（质量门在无数据库环境下仍可全绿，但合并记忆相关改动前须带数据库跑一遍）。该变量只是测试基础设施，不属于运行期配置。本地启动测试库：
+
+```bash
+docker run --rm -d --name persona-mem-test -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_PASSWORD=test postgres:17
+export PERSONA_MEMORY_TEST_DSN='postgres://postgres:test@localhost:5432/postgres?sslmode=disable'
+go test -race ./internal/memory/...
+```
+
+每个测试经 `memtest.NewDB` 建独立 schema（DSN 带 `search_path`），结束时删除，测试之间互不影响。
+
+S3 真实宿主运行验收（只启动 mock，独立 schema；按真实分钟调度，约 1 分钟）：
+
+```bash
+go build -C cmd/devhost -o /tmp/persona-memory-devhost .
+PERSONA_MEMORY_HOST_BINARY=/tmp/persona-memory-devhost go test ./internal/memory -run TestRuntimeHostCleanup -v -count=1
+```
+
+该测试同时需要 `PERSONA_MEMORY_TEST_DSN`；普通质量门不设置宿主变量时跳过这项分钟级验收。
+
+S4 真实数据与真实 LLM 运行验收：设置 `PERSONA_MEMORY_TEST_DSN`（只读其中已采集消息；测试写入独立 schema）、`PERSONA_MEMORY_RUNTIME_LLM_BASE_URL`、`PERSONA_MEMORY_RUNTIME_LLM_API_KEY`、`PERSONA_MEMORY_RUNTIME_LLM_MODEL`，可选 `PERSONA_MEMORY_RUNTIME_LLM_HEADERS`（JSON 对象），运行：
+
+```bash
+go test ./internal/memory/summary -run TestRuntimeDailySummary -v -count=1
+```
+
+测试把一个真实会话日回放为待摘要日期，不改源库；输出生成结果及来源归属校验，供人工抽读。这是运行抽验，S7 的 20 日正式评测另行执行。
+
+S5 真实宿主注入与故障验收（需已配置可用聊天 LLM；只发送合成聚餐数据）：
+
+```bash
+go build -C cmd/devhost -o /tmp/persona-memory-devhost .
+PERSONA_MEMORY_CONTEXT_HOST_BINARY=/tmp/persona-memory-devhost go test ./internal/memory -run TestRuntimeHostContext -v -count=1
+```
+
+测试使用独立 schema，通过仅供该宿主使用的 TCP 转发切断数据库链路，确认 debug 提示词含记忆块、模型回复提及摘要，故障后仍回复；不会停止共享 PostgreSQL，也不连接 QQ。
+
+S6 显式查询真实宿主验收（仅向已配置聊天模型发送固定合成摘要，不读取真实会话）：
+
+```bash
+go build -C cmd/devhost -o /tmp/persona-memory-devhost .
+PERSONA_MEMORY_SUMMARY_HOST_BINARY=/tmp/persona-memory-devhost go test ./internal/memory -run TestRuntimeHostSummaryTool -v -count=1
+```
+
+同样需要测试 DSN 与宿主聊天模型配置。测试询问上周三（附明确日期），检查 `memory__summary` 调用成功且回复包含对应摘要。
+
+S7 评测：case 与映射表含真实数据，只能放在仓库外或被忽略的目录（如 `bin/eval/`），不得提交；真实数据相关只提交指标记录 `internal/memory/summary/testdata/eval/RESULTS.md`（B 的合成问题集随代码提交）。评测测试只在对应环境变量齐全时运行，否则 `t.Skip`；真实 LLM 评测耗时长，命令显式放宽 `-timeout`（`go test` 默认 10 分钟）。
+
+导出（源库只读；case 名由会话代号与日期拼成 `<会话代号>-<YYYY-MM-DD>`）：
+
+```bash
+mkdir -p bin/eval
+export PERSONA_MEMORY_EVAL_CASES_DIR="$PWD/bin/eval/cases"
+export PERSONA_MEMORY_EVAL_ID_MAP="$PWD/bin/eval/id_map.json"
+PERSONA_MEMORY_EVAL_SOURCE_DSN='postgres://...' PERSONA_MEMORY_EVAL_CONV='group:onebot:...' \
+PERSONA_MEMORY_EVAL_DATE=2026-11-07 PERSONA_MEMORY_EVAL_CODE=g1 \
+go test ./internal/memory/summary -run TestEvalExport -v -count=1
+```
+
+A：摘要与话题归类。回放 case、调用真实流水线，每次运行新建隔离 schema；大小模型应与生产的 `memory_llm_model_small` / `memory_llm_model_large` 一致：
+
+```bash
+PERSONA_MEMORY_TEST_DSN='postgres://...' \
+PERSONA_MEMORY_EVAL_CASES_DIR="$PWD/bin/eval/cases" \
+PERSONA_MEMORY_EVAL_LLM_BASE_URL='https://.../v1' PERSONA_MEMORY_EVAL_LLM_API_KEY='...' \
+PERSONA_MEMORY_EVAL_LLM_MODEL_SMALL='...' PERSONA_MEMORY_EVAL_LLM_MODEL_LARGE='...' \
+PERSONA_MEMORY_EVAL_RUNS=3 \
+go test ./internal/memory/summary -run TestEvalDaily -v -count=1 -timeout 3h > bin/eval/daily-report.txt
+```
+
+`PERSONA_MEMORY_EVAL_RUNS` 缺省为 3。报告含生成的摘要内容，写到被忽略的 `bin/`，不提交；指标与改动摘要追加到 [`internal/memory/summary/testdata/eval/RESULTS.md`](../internal/memory/summary/testdata/eval/RESULTS.md)。
+
+B：`memory__summary` 的调用时机。需要 `PERSONA_MEMORY_TEST_DSN`（隔离 schema）与宿主聊天模型配置（同 S6）；使用 `cmd/devhost/config.yaml` 的生产人格、每个问题独立群号与合成摘要，不读取真实会话。问题集见 `internal/memory/testdata/eval/tool_queries.json`。须在上海时间 04:00–23:00 之间开始运行，否则摘要日与模型看到的日历日不一致，测试会跳过：
+
+```bash
+go build -C cmd/devhost -o /tmp/persona-memory-devhost .
+PERSONA_MEMORY_TEST_DSN='postgres://...' PERSONA_MEMORY_EVAL_HOST_BINARY=/tmp/persona-memory-devhost \
+go test ./internal/memory -run TestEvalSummaryTool -v -count=1 -timeout 1h > bin/eval/tool-report.txt
+```
+
+B 只记录、看趋势，不设门槛；结果与 A 记在同一个 `RESULTS.md`。
+
 ## 11.2 单元测试矩阵
 
 ```text
@@ -26,6 +108,11 @@ go test -race ./...
 
 | 用例 | 断言 |
 | --- | --- |
+| S4 LLM 客户端 | 凭据及 JSON 模式、宿主超时隔离、网络退避、结构修复与 token 统计 |
+| S6 显式查询与工具 | 日期补全与非法范围、关键词排序与零相关回落、Limit 边界、会话隔离、工具 schema 与错误映射、人格继承及过滤、MCP 刷新保留记忆工具 |
+| S6 滚动摘要 | 200 条触发与每日次数上限、增量合并与固定运行序号重放、日摘要并发替换、滚动候选与短期历史去重；`TestRuntimeRollingLifecycle` 以真实 Service / PostgreSQL、HTTP 桩与可控时钟覆盖凌晨归属至日摘要替换 |
+| S5 读取与注入 | 最近三天日摘要、可信会话隔离、关键词及时间打分、话题去重、行预算、提示词位置、随机轮次读取、错误及超时降级 |
+| S4 日摘要 | 切片与预过滤、来源及归属校验、确定性合并、跨天延续、失败日期重试、幂等覆盖与空结果清理 |
 | 无发送者 | 决策结果 `reason=no_sender` |
 | 非群聊（群 Handler 收到 `Kind=private`） | 决策结果 `reason=not_group` |
 | 非私聊（私聊 Handler 收到 `Kind=group`） | 决策结果 `reason=not_private` |
@@ -126,6 +213,11 @@ go test -race ./...
 | 工具循环：后续轮次 `Complete` 失败 | `reason=llm_error`，不发送 |
 | 工具日志 | 工具参数 `args` 只在 `debug_prompts=true` 时出现；MCP 日志契约见 [`mcp.md`](mcp.md) §14.4-14.5，不再单独枚举日志测试 |
 | 工具配置校验 | `tools_max_rounds=0` → `必须 >= 1`；`tools_result_max_chars=0` → `必须 >= 1`；MCP 名称与启用规则补现有配置表，见 [`mcp.md`](mcp.md) §14.10.1 |
+| 记忆配置 | 默认 `memory_database_dsn=""`、`8`/`50`/`5s`/`2048`；DSN 为空时 `p.mem == nil`，非空时构造 `*memory.Service`；`memory_ingest_interval=0s` → `必须 > 0`；`memory_db_max_open_conns`/`memory_ingest_batch`/`memory_queue_size=0` → `必须 >= 1`；batch 大于队列 → `不能大于 memory_queue_size` |
+| 记忆记录构造（`memory_test.go`） | 群聊 `Conv`/`EventID`/`MsgID` 正确；`KeyMessageID` 为数字 `9001` 时 `ReplyTo="9001"`；`Mentions` 排除 `all`；`At` 为 UTC、零值回落 `p.now()`；私聊带 `PeerUserID`、`Name` 回落昵称；`Text` 截断到 2000 rune；自身回复 `Conv.Name` 为空、无消息 ID 时 `EventID=local:<启动时刻>:<序号>` 递增 |
+| 记忆入队（`fakeMemory`） | 懒加载中、`/agent off`、机器人发送者的消息照常入队；命令消息、名单拒绝的会话不入队；发送成功后自身回复入队（`Self=true`、人格名、`Sender.ID=botID`），发送失败不入队；`Enqueue` 返回 false 时回复与历史不变 |
+| 记忆生命周期 | `Start` 启动记忆；`Stop` 调用记忆 `Stop` 时插件级 ctx 尚未取消 |
+| `/agent memory status` | 未启用输出 `记忆：未启用`；启用时两行逐字一致；缺参或非法参数回用法文本，不建会话状态 |
 
 P8 删除 `rag_test.go`、内置注册表测试和旧 RAG 配置用例；通用循环、人格三态与日志参数测试继续保留，桩与配置的迁移见 [`mcp.md`](mcp.md) §14.10.1。
 
@@ -142,6 +234,7 @@ reason 词表（24 个）单测覆盖：`not_group`、`not_private`、`no_sender
 | `p.completer` | `*openaiClient` | 屏蔽真实 LLM（实现 completer 接口），返回固定文本、工具调用或错误 |
 | `p.tools` (`[]tool`，受目录锁保护) | Setup 时为空，Start/reload 发布完整 MCP 目录；MCP 未启用时为空 | 注入桩工具，断言调用参数与返回结果（[`mcp.md`](mcp.md) §13.2） |
 | `p.api` (`bot.BotAPI`) | 注入的 `PluginContext.Bot` | 捕获 `Send` 调用；命令测试用 `bot.NewNoopReply()` 断言 `PlainText()` |
+| `p.mem` (`memoryBackend`) | DSN 非空时为 `*memory.Service`，否则 nil | 根包测试注入 `fakeMemory`（`newTestEnvMem` 在 Setup 后、Start 前替换），不连数据库 |
 
 禁止为测试引入第三方 mock 库，全部用标准库 testing + 手写桩。
 
@@ -219,3 +312,76 @@ PY
 - **及时返回**：在存在待生成协程时调用 `Stop`，断言在 15s 内返回（`wg.Wait` 配合插件级 ctx cancel）。
 - **无定时器泄漏**：断言 `Stop` 失效全部批处理（`timer` 停止、`timerSeq++`、`awaiting` 清零），且已触发的旧回调不会重新布防或新增 `p.wg` 任务。
 - **幂等**：重复调用 `Stop` 安全无 panic。
+
+## 11.5 本地联调宿主（devhost）
+
+`cmd/devhost/` 是接真实 bot 与记忆库做手工联调的宿主：与 kei 的 `cmd/bot` 同构（空导入 + `kei.Run`），空导入本插件与所需适配器。它是**独立 Go 模块**（自带 `go.mod`，replace 本仓库与同级 `../kei`），因此根模块的质量门不编译它，插件本体的依赖规则也不受影响。
+
+连哪个 bot、用哪个数据库全部由配置决定，改完插件代码重新运行即可复用同一个 bot 与数据库（记忆库表结构由插件启动时自动迁移）：
+
+| 文件 | 提交 | 内容 |
+| --- | --- | --- |
+| `config.yaml` | 是 | mock 与 `qq-main`（OneBot `forward_ws`，缺省关闭）两个 bot、persona 联调参数；不写密钥与本机地址 |
+| `.env.example` | 是 | 需要填写的环境变量模板 |
+| `.env` | 否（已忽略） | 本机值与密钥：LLM、SnowLuma 地址与 token、bot QQ 号、测试群、管理员、记忆库 DSN |
+
+`.env` 里的 `KEI_*` 变量覆盖或新增 `config.yaml` 的键，空值不生效（kei `docs/configuration.md` §12.7，插件侧见 [`configuration.md`](configuration.md) §10.3）：`KEI_BOTS_QQ_MAIN_<KEY>` 写 `qq-main` 的设置，`KEI_PLUGINS_PERSONA_<KEY>` 写插件键，二者的列表值用 YAML 写法（如 `[123456]`）；`KEI_AUTH_ADMIN_USERS` 例外，用逗号分隔。常用开关：
+
+- 只用 mock：`KEI_BOTS_QQ_MAIN_ENABLED` 留空或 `false`。
+- 关闭记忆：`KEI_PLUGINS_PERSONA_MEMORY_DATABASE_DSN` 留空。
+- 新增平台：在 `main.go` 补一行适配器空导入，在 `config.yaml` 的 `bots` 加一个缺省关闭的条目。
+
+`main.go` 已空导入 kei 的 SQL 存储方言（`pkg/kei/sql`），编译需要 cgo（devShell 自带 gcc，`CGO_ENABLED` 默认开启；产物链接 nix store 的 glibc，只能在本机运行）。`config.yaml` 的 kei 自身存储仍是 `storage.type: memory`，`/agent` 的运行时覆盖重启即丢；需要保留时设 `KEI_STORAGE_TYPE=sqlite` 与 `KEI_STORAGE_DSN=<文件路径>`。
+
+mock 适配器的发送 ID 按进程从 `mock-1` 计数，而机器人自身回复以发送 ID 作去重键（`m:<MsgID>`），因此重启后同一 mock 会话里的新回复会与上一轮的旧回复撞键、计为「重复」而不落库。mock 与真实 bot 的 `conv_key` 带平台名，二者互不冲突；用 mock 测记忆层时让 DSN 指向单独的 schema 并每轮重建，见 [`memory/deploy.md`](memory/deploy.md)「注意事项」。
+
+### 运行
+
+```bash
+cp cmd/devhost/.env.example cmd/devhost/.env   # 首次：填写 .env
+cd cmd/devhost
+(set -a && . ./.env && exec go run .)           # devShell 内执行；子 shell 避免密钥留在当前 shell
+```
+
+根模块质量门不编译 devhost，改动 kei 或适配器后可单独检查：`(cd cmd/devhost && go build -o ../../bin/devhost . && go vet ./...)`。编译 devhost 一律用 `-o` 输出到已忽略的 `bin/`：在 `cmd/devhost` 里直接 `go build`（包括 `go build ./...`）会在当前目录生成未被忽略的 `devhost` 二进制。
+
+VS Code：装 direnv 扩展（`mkhl.direnv`）让编辑器加载 devShell 的 Go 与 dlv，再在本地建 `.vscode/launch.json`（`.vscode/` 被忽略，不提交）：
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "devhost",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/devhost",
+      "cwd": "${workspaceFolder}/cmd/devhost",
+      "envFile": "${workspaceFolder}/cmd/devhost/.env",
+      "output": "${workspaceFolder}/bin/__debug_devhost"
+    },
+    {
+      "name": "devhost（仅 mock）",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/devhost",
+      "cwd": "${workspaceFolder}/cmd/devhost",
+      "envFile": "${workspaceFolder}/cmd/devhost/.env",
+      "output": "${workspaceFolder}/bin/__debug_devhost",
+      "env": {
+        "KEI_BOTS_QQ_MAIN_ENABLED": "false",
+        "KEI_PLUGINS_PERSONA_GROUP_LIST": "[g1]",
+        "KEI_PLUGINS_PERSONA_TRIGGER_KEYWORDS": "[bot]"
+      }
+    }
+  ]
+}
+```
+
+「仅 mock」项沿用 `.env` 的 LLM 与记忆库，只关掉真实 bot、放行 mock 的 `g1`，并以关键词 `bot` 触发（`/inject` 构造不了 @），注入 `{"text":"bot 在吗","user_id":"u1","channel_id":"g1"}` 即可，其余见 §11.3。`output` 把调试二进制放进已忽略的 `bin/`。
+
+### 接真实 QQ 与记忆库
+
+依赖容器（SnowLuma + PostgreSQL）的搭建、开发机 `.env`、正式部署、注意事项与验收见 [`memory/deploy.md`](memory/deploy.md)。
